@@ -14,6 +14,9 @@ quality, control or traceability.
 - **Fork points stay forever.** `neo lane` anchors every lane at the commit
   it forked from (`refs/safety/<kind>/<slug>`); every push of the lane
   carries the anchor, and nothing deletes or moves it.
+- **Nothing is lost, nothing leaks.** Lanes, the attic, dev and main are
+  never deleted by hand, and no secret, key, build output or archive is ever
+  committed (`pre-commit`, land, pre-push, the agent guard).
 - **History is the database.** Versions, lane names and requirements are read
   from dev's first-parent line; nothing else stores them. Every point of
   progress can be rebuilt, blamed and bisected per commit and per concern.

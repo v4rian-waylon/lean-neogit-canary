@@ -59,6 +59,27 @@ number never names two lanes (I7), online or offline:
   hand-made name with a number the clone did not reserve for it is refused
   at land.
 
+## Developers never delete branches
+
+dev, main, lanes, the attic and safety anchors are never deleted or renamed
+by hand, by a human or an agent: a lane leaves only as neo moves it.
+
+- `neo land` retires a landed lane (its commits live on as the merge's
+  second parent, its fork point in its anchor); `neo lane --close` moves a
+  lane to the attic; `neo lane --rename` renames one, keeping the old
+  anchor.
+- pre-push refuses deleting a lane on the remote unless the same push is
+  neo's move: dev's new tip holds the lane (land) or `attic/<same name>`
+  takes its tip (close). It refuses deleting an attic branch, dev, main or
+  an anchor outright.
+- The agent guard denies `git branch -d/-D/-m/-M`, `update-ref -d` and a
+  deleting push of dev, main, a lane or an attic branch, preflight or not.
+- Convention for humans in their own clone: git has no hook on a local
+  branch deletion, so a local `git branch -D` of a lane is not caught; its
+  anchor stays, and once pushed origin keeps the lane. On a forge the
+  rulesets keep dev, main and the attic; a lane cannot carry a deletion
+  rule, since `neo land` retires it in its atomic push.
+
 ## Safety anchors
 
 Safety anchors stay forever. `neo lane` writes `refs/safety/<kind>/<slug>`,
@@ -160,6 +181,14 @@ remote is transport, never publishing.
   agent committer (an agent's foreign `--author`) is refused at commit, land,
   push and by I4. No `Co-Authored-By: Claude` trailer.
 - A lane holds 1 to `max_commits` commits (default 20) and no merge commit.
+- Banned files never enter history, for humans as for agents: secrets and
+  keys (`.env` and `.env.*` but templates such as `.env.example`, `.auth/`,
+  `keys/`, `*.p8`, `*.p12`, `*.pem`, `*.cer`, `*.provisionprofile`,
+  `*.mobileprovision`), build output (`build/`, `build-*/`), `node_modules/`,
+  `*.zip`, `*.bak` and `.DS_Store`. `pre-commit` refuses them in the staged
+  set on every branch; a lane push and `neo land` refuse a lane commit
+  that adds one past the hook; the agent guard denies staging one. Deleting
+  one is always allowed; a lane that ever added one is rebuilt without it.
 - Caught at the earliest point: the commit that would make a lane
   `max_commits + 1` is refused before it is written (`prepare-commit-msg`;
   an amend passes); a lane's first commit never carries the placeholder
