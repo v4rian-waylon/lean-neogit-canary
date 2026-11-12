@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# prepare-commit-msg - a lane never grows past max_commits (dev's conf): the
+# commit that would make it max_commits + 1 is refused here, before it is
+# written, with the split instruction. An amend adds no commit and passes
+# (source "commit" on HEAD, or --amend on the git command running the hook). Message rules stay in commit-msg.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+for l in core policy; do . "$here/lib/$l.sh"; done
+b=$(neo_branch)
+case "$b" in lane/*) ;; *) exit 0 ;; esac
+neo_lane_parse "$b" >/dev/null || exit 0
+dev=$(git rev-parse -q --verify refs/heads/dev) || exit 0
+head=$(git rev-parse -q --verify HEAD) || exit 0
+if [ "${2:-}" = commit ] && [ "${3:-}" = "$head" ]; then exit 0; fi
+# git passes no amend flag with -m or -F: read it from the git command that runs this hook
+case " $(ps -o args= -p "$PPID" 2>/dev/null || true) " in *" --amend "*) exit 0 ;; esac
+export NEO_CONF_REV="$dev"
+n=$(git rev-list --count "dev..HEAD")
+max=$(neo_policy_max_commits)
+if [ "$n" -ge "$max" ]; then
+  echo "X prepare-commit-msg: $b already carries $n commits (max_commits=$max); this one would be $((n + 1))." >&2
+  echo "  Split the work: land this lane (neo land), then start a new lane for the rest." >&2
+  exit 1
+fi
+exit 0

@@ -1,0 +1,5 @@
+# Identities that may author commits: "<email> <name> [agent]", one per line.
+# A row ending in "agent" is an AI agent: its commits author as "<name> (<Model>)".
+# With no rows, any real email (not empty, not a placeholder) is accepted; a
+# lone "*" row keeps that for humans while the rows below still apply.
+canary@neo-canary.invalid neo canary owner

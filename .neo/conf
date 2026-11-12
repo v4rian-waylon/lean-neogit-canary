@@ -1,0 +1,7 @@
+land_who=anyone
+max_commits=20
+test_paths=*
+gates_fast=true
+gates_full=true
+gates_release=true
+forge_repo=v4rian-waylon/lean-neogit-canary

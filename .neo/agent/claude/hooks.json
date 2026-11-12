@@ -1,0 +1,6 @@
+{
+  "PreToolUse": [
+    { "matcher": "Bash", "command": "guard-destructive.sh", "timeout": 30, "onFailure": "block" },
+    { "matcher": "Write|Edit|NotebookEdit", "command": "guard-write.sh", "timeout": 30, "onFailure": "block" }
+  ]
+}
