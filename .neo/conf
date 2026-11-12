@@ -6,5 +6,3 @@ gates_full=true
 gates_release=true
 forge_repo=v4rian-waylon/lean-neogit-canary
 max_commit_lines=999999
-land_pr=required
-land_approvals=0
