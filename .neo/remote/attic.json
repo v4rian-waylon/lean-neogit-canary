@@ -2,7 +2,7 @@
   "name": "neo-attic",
   "target": "branch",
   "enforcement": "active",
-  "conditions": { "ref_name": { "include": ["refs/heads/attic/**"], "exclude": [] } },
+  "conditions": { "ref_name": { "include": ["refs/heads/attic/**/*"], "exclude": [] } },
   "rules": [ { "type": "deletion" }, { "type": "non_fast_forward" } ],
   "bypass_actors": []
 }
