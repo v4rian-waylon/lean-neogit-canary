@@ -17,6 +17,7 @@
 | REQ-R-forge-261112104430 | The canary keeps the rulesets and the neo-check workflow of run 261112104430 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112104430` |
 | REQ-R-review-261112104037 | Lands of run 261112104037 go through review on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/review-261112104037` |
 | REQ-R-review-261112104430 | Lands of run 261112104430 go through review on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/review-261112104430` |
+| REQ-R-unreview-261112104430 | Run 261112104430 puts lands back to optional review. | P2 | ✅ done | ⚠️ needs units | internal | `chore/unreview-261112104430` |
 | REQ-R-unreview0-261112104430 | Run 261112104430 puts lands back to optional review left by an earlier run. | P2 | ✅ done | ⚠️ needs units | internal | `chore/unreview0-261112104430` |
 | REQ-R-upgrade-261112104430 | The canary takes the framework under test for run 261112104430. | P2 | ✅ done | ⚠️ needs units | internal | `chore/upgrade-261112104430` |
 | REQ-R-widget-261112104037 | A widget lane of run 261112104037 runs the forge jobs green. | P1 | ✅ done | ⚠️ needs units | internal | `feature/widget-261112104037` |
