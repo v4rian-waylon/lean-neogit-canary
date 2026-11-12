@@ -15,6 +15,7 @@
 | REQ-R-forge-261112103904 | The canary keeps the rulesets and the neo-check workflow of run 261112103904 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112103904` |
 | REQ-R-forge-261112104037 | The canary keeps the rulesets and the neo-check workflow of run 261112104037 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112104037` |
 | REQ-R-forge-261112104430 | The canary keeps the rulesets and the neo-check workflow of run 261112104430 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112104430` |
+| REQ-R-forge-261112112049 | The canary keeps the rulesets and the neo-check workflow of run 261112112049 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112112049` |
 | REQ-R-review-261112104037 | Lands of run 261112104037 go through review on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/review-261112104037` |
 | REQ-R-review-261112104430 | Lands of run 261112104430 go through review on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/review-261112104430` |
 | REQ-R-unreview-261112104430 | Run 261112104430 puts lands back to optional review. | P2 | ✅ done | ⚠️ needs units | internal | `chore/unreview-261112104430` |
