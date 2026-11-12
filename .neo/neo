@@ -226,7 +226,10 @@ _render_ruleset() {
     [[ "$n" =~ ^[0-9]{1,2}$ ]] && [ "$n" -le 10 ] || NEO_RC=2 neo_die "land_approvals='$n' must be 0 to 10 for the forge's review rule"
     rules='"rules": [ { "type": "deletion" }, { "type": "non_fast_forward" }, '
     rules="$rules"'{ "type": "required_status_checks", "parameters": { "strict_required_status_checks_policy": false, "required_status_checks": [ { "context": "neo-check" }, { "context": "commit-audit" } ] } }, '
-    rules="$rules"'{ "type": "pull_request", "parameters": { "required_approving_review_count": '"$n"', "dismiss_stale_reviews_on_push": true, "require_last_push_approval": true, "require_code_owner_review": false, "required_review_thread_resolution": false } } ]'
+    # the last push needs someone else's approval whenever an approval is required at all; with
+    # land_approvals=0 there is no approval to give, and GitHub would refuse every merge (live canary C7)
+    local lpa=true; [ "$n" -ge 1 ] || lpa=false
+    rules="$rules"'{ "type": "pull_request", "parameters": { "required_approving_review_count": '"$n"', "dismiss_stale_reviews_on_push": true, "require_last_push_approval": '"$lpa"', "require_code_owner_review": false, "required_review_thread_resolution": false } } ]'
     sed -E "s#\"rules\": \[ \{ \"type\": \"deletion\" \}, \{ \"type\": \"non_fast_forward\" \} \]#$rules#" "$f"
   else
     cat "$f"
