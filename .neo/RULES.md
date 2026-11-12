@@ -5,14 +5,16 @@ convention, marked as one. The enforcement points are the `pre-commit`,
 `prepare-commit-msg`, `commit-msg` and `pre-push` hooks, `neo land` and
 `neo release`; the history checks are
 `neo doctor --history` (invariants I1 to I9 in `.neo/lib/history.sh`) and
-`neo doctor --prove` (every merge's gates rerun on its own tree). Client
+`neo doctor --prove` (every merge's gates rerun on its own tree, and every
+release's gate rerun on the released tree). Client
 hooks are a guard rail for honest work: anyone with a clone can skip them
 (`--no-verify`, a hand-written proof note), and the agent guard denies both
 to agents. On a forge the authority is the server: the rulesets from
 `neo setup --remote` (no deletion or rewrite of dev, main and the attic, no
-moved or deleted tag, no update of main except by the repository's admins) and, with `land_pr=required`, GitHub's own review rule
-on dev (`land_approvals` approvals given after the last push) plus the
-neo-check and commit-audit statuses, which the workflow computes with dev's checker, never the
+moved or deleted tag, no update of main and no new `release/*` tag except by
+the repository's admins) and, with `land_pr=required`, GitHub's own review
+rule on dev only, never on main (`land_approvals` approvals given after the
+last push) plus the neo-check and commit-audit statuses, which the workflow computes with dev's checker, never the
 candidate's. A candidate's gates are its own tests and it can edit the
 workflow file, so review, not the status, is what a hostile change meets.
 
@@ -24,7 +26,8 @@ workflow file, so review, not the status, is what a hostile change meets.
 | `main` | `neo release` by the owner only: fast-forward to a released dev commit | a commit dev lacks, a rewrite, a deletion, a release by anyone but the owner |
 | `lane/<kind>/<number>.<slug>` | your commits; `neo sync` rebases it onto dev | landing without `neo land` |
 | `attic/<kind>/<slug>` | `neo lane --close` / `--restore` | deletion: pre-push and the `neo-attic` ruleset refuse it (the reason is a git note) |
-| `refs/safety/<kind>/<slug>` | written once by `neo lane` at the fork point | deletion, a move, a hand-written anchor: pre-push and the agent guard refuse them |
+| `safety/<kind>/<slug>` | written once by `neo lane`: an anchor commit on the fork point | deletion, a move, a hand-written anchor: pre-push, the agent guard and the `neo-safety-lockdown` ruleset refuse them |
+| `vault/<kind>/<slug>` | written once by `neo land` at the landed lane tip | deletion, a move, a hand-written vault branch: pre-push, the agent guard and the `neo-vault-readonly` ruleset refuse them |
 
 Kinds: `feature fix refactor docs test chore`. Slugs: `a-z`, `0-9`, `-`, 2 to
 48 chars, unique for the life of the repository (I7). The attic and the
@@ -39,7 +42,7 @@ number never names two lanes (I7), online or offline:
 - Online, the number is `n<N>`: N is one more than the highest number the
   clone knows of (and never below the count of merges on dev, since every
   lane landed before numbers spent one). `neo lane` reserves it on origin
-  with one create-only atomic push of `refs/safety/numbers/n<N>` and the
+  with one create-only atomic push of `safety/numbers/n<N>` and the
   lane's anchor; when another clone took that number first it counts again,
   so origin serializes every online number.
 - With origin unreachable, the number is `n<N>-<c>`: `c` is the first six
@@ -49,11 +52,11 @@ number never names two lanes (I7), online or offline:
   number for good; its first push publishes the reservation, and pre-push
   refuses a push that would meet another lane's reservation of it.
 - With no origin at all (a single clone) it is `n<N>`, reserved locally.
-- `refs/safety/numbers/<number>` names the lane's anchor, so it stays
-  forever like one; with the anchor's tagger date it orders every lane ever
+- `safety/numbers/<number>` names the lane's anchor, so it stays
+  forever like one; with the anchor commit's date it orders every lane ever
   started, landed, open or abandoned in the attic. `git for-each-ref
-  --format='%(refname:lstrip=3) %(creatordate:iso) %(contents:subject)'
-  refs/safety/numbers` lists them.
+  --format='%(refname:lstrip=4) %(committerdate:iso) %(contents:subject)'
+  refs/heads/safety/numbers` lists them.
 - A landed merge carries its number as `Lane-Number:` (land, I3). A lane
   made by hand or before numbers takes the next number when it lands; a
   hand-made name with a number the clone did not reserve for it is refused
@@ -61,32 +64,49 @@ number never names two lanes (I7), online or offline:
 
 ## Developers never delete branches
 
-dev, main, lanes, the attic and safety anchors are never deleted or renamed
-by hand, by a human or an agent: a lane leaves only as neo moves it.
+dev, main, lanes, the attic, safety anchors and vault branches are never
+deleted or renamed by hand, by a human or an agent: a lane leaves only as
+neo moves it, and on a forge only a repository admin removes a lane.
 
-- `neo land` retires a landed lane (its commits live on as the merge's
-  second parent, its fork point in its anchor); `neo lane --close` moves a
-  lane to the attic; `neo lane --rename` renames one, keeping the old
-  anchor.
-- pre-push refuses deleting a lane on the remote unless the same push is
-  neo's move: dev's new tip holds the lane (land) or `attic/<same name>`
-  takes its tip (close). It refuses deleting an attic branch, dev, main or
-  an anchor outright.
+- `neo land` lands a lane (its commits live on as the merge's second
+  parent, its fork point in its anchor, its tip in its vault branch); then,
+  apart from the land's atomic push, it tries to delete the lane on origin.
+  The `neo-pool-deletions` ruleset lets only admins do that: for anyone
+  else the lane stays on origin, landed. `neo lane --close` moves a lane to
+  the attic and likewise leaves the lane itself for an admin.
+- `neo status` and `neo doctor` list landed lanes still on origin, and an
+  admin's `neo lane --retire [LANE...]` deletes them; it never deletes a
+  lane dev does not hold (close that one instead).
+- pre-push refuses deleting a lane on the remote unless neo moves it: the
+  same push lands it on dev or parks it as `attic/<same name>`, or this
+  clone's dev already holds it, or the remote already parks it in the
+  attic at that tip. It refuses deleting an attic branch, dev, main, an
+  anchor or a vault branch outright.
 - The agent guard denies `git branch -d/-D/-m/-M`, `update-ref -d` and a
-  deleting push of dev, main, a lane or an attic branch, preflight or not.
+  deleting push of dev, main, a lane, an attic, safety or vault branch,
+  preflight or not.
+- On a forge the rulesets are the authority, as in neo-git: `neo-protected`
+  and `neo-main` keep dev and main, `neo-attic` the attic,
+  `neo-safety-lockdown` the safety branches (no creation, update or
+  deletion), `neo-vault-readonly` the vault branches (no update or
+  deletion) and `neo-pool-deletions` the lanes (no deletion); only
+  repository admins bypass the last three. A safety branch is created by
+  neo's own push, so on a forge that runs `neo-safety-lockdown` a non-admin's
+  lane reserves its number as offline work (it carries the clone's id) and
+  its anchor reaches the forge once an admin pushes it.
 - Convention for humans in their own clone: git has no hook on a local
   branch deletion, so a local `git branch -D` of a lane is not caught; its
-  anchor stays, and once pushed origin keeps the lane. On a forge the
-  rulesets keep dev, main and the attic; a lane cannot carry a deletion
-  rule, since `neo land` retires it in its atomic push.
+  anchor stays, and once pushed origin keeps the lane.
 
 ## Safety anchors
 
-Safety anchors stay forever. `neo lane` writes `refs/safety/<kind>/<slug>`,
-an annotated tag object on the commit the lane forked from (who forked it
-and when), and nothing ever deletes or moves it: the lane may be synced,
-renamed, closed to the attic or landed and deleted, and its fork point is
-still there.
+Safety anchors stay forever. `neo lane` writes the branch
+`safety/<kind>/<slug>`, as neo-git did, on an anchor commit whose only
+parent is the commit the lane forked from and whose message, author and
+date record the lane and who started it when (a commit per lane, so two
+lanes forked from one dev tip never share an anchor). Nothing ever deletes
+or moves it: the lane may be synced, renamed, closed to the attic or landed
+and retired, and its fork point (`safety/<kind>/<slug>^1`) is still there.
 
 - Every push that carries a lane carries its anchor: pre-push pushes it
   first when the remote lacks it (and a clone sharing a coworker's lane
@@ -94,16 +114,32 @@ still there.
   in their atomic push, and `neo sync --dev` publishes the anchors of lanes
   landed offline. A lane made by hand or before anchors existed gets one
   where it leaves dev, at its first push or land.
-- `neo lane --rename` writes the new name's anchor at the same fork point;
-  the old name's anchor stays.
+- `neo lane --rename` writes the new name's anchor on the same anchor
+  commit; the old name's anchor stays.
 - pre-push refuses deleting an anchor, moving one, and creating one that is
-  not an annotated tag on a commit; the agent guard denies `update-ref` on
-  `refs/safety/`, a push that deletes, forces or sends anything but the
-  anchor itself there, and a pruning or forced fetch into it, preflight or
-  not. A forge ruleset can only name branches and tags, so on a forge a
-  push past the hooks (`--no-verify`) is the one way left to delete one.
-- Anchors are not fetched by default: `git fetch origin
-  'refs/safety/*:refs/safety/*'` brings them.
+  not an anchor commit (one parent, the fork point); the agent guard denies
+  `update-ref` and `git branch` writes on safety branches, a push that
+  deletes, forces or sends anything but the anchor itself there, and a
+  pruning or forced fetch into it, preflight or not; on a forge
+  `neo-safety-lockdown` does the same for everyone but admins.
+- Anchors written before they were branches (`refs/safety/<kind>/<slug>`,
+  annotated tags) are still read and kept; `neo doctor`, a land and a sync
+  migrate each to its branch, the same commit on every clone (the tag's
+  tagger and date become the commit's).
+
+## Vault branches
+
+Every landed lane also keeps a pointer to its end. `neo land` writes the
+branch `vault/<kind>/<slug>` on the lane's tip as it landed (the merge's
+second parent), in the same atomic push as dev and the tag, as neo-git
+vaulted a merged pool; an offline land's vault branch is published by `neo
+sync --dev`. With the anchor at its start, every lane is bounded by two
+branches that stay forever, after the lane branch itself is retired. They
+are pointers, not copies: the commits are dev's anyway. A re-land keeps the
+vault branch of the lane's first land. pre-push, the agent guard and, on a
+forge, `neo-vault-readonly` keep vault branches as they keep anchors: never
+deleted, moved or hand-written. Earlier `refs/vault/<kind>/<slug>` refs are
+read and migrated like anchors.
 
 ## Production
 
@@ -123,10 +159,16 @@ remote is transport, never publishing.
   rule.
 - Enforced by `neo release` (before its gate; the release tag records
   `Released-By:`), pre-push (main moves only to an annotated `release/<v>`
-  whose tagger the policy at the old main allows), I5 (each release tag's
-  tagger against the policy at the release before it), the agent guard (an
-  agent's `neo release` is denied; `--dry-run` is allowed) and, on a forge,
-  the `neo-main` ruleset (only the repository's admins update main).
+  whose tagger the policy at the old main allows, and a `release/<v>` tag
+  pushed on its own, which would open the next series, meets the same
+  tagger check), I5 (each release tag's tagger against the policy at the
+  release before it), the agent guard (an agent's `neo release` is denied,
+  `--dry-run` is allowed, and so is any `release/<v>` tag it would create,
+  write or push) and, on a forge, the `neo-main` ruleset (only the
+  repository's admins update main) and the `neo-release-tags` ruleset (only
+  they create a `release/*` tag). dev's review rule (`land_pr=required`)
+  lives in the dev-only `neo-review` ruleset, so it never blocks the owner's
+  release push to main.
 
 ## Commits
 
@@ -206,11 +248,12 @@ remote is transport, never publishing.
 
 Lane-Base: <dev tip the lane contained>
 Requirement: requirements/<slug>.md
-Gates: fast=<pass|none> full=<pass|none>
+Gates: fast=<pass|none> full=<pass|none>[ (pre-gated <tree>[: fast|full])]
 Tested-Tree: <tree the gates passed on, equal to the merge's tree>
 Lane-Number: <the lane's number, n<N> or n<N>-<c>>
 Ticket: <CODE-123>              (when the lane has one)
 Proof: <test file or S<nn>>     (the requirement's proof, requirement_proof=required)
+Docs: <docs> | none (<reason>)  (a lane that changes code a docs_rules pair names)
 ```
 
 The lane must contain dev's tip (else `neo sync` first), so the gated tree is
@@ -235,6 +278,16 @@ on every merge's tree, and the neo-check workflow does so for each new dev
 merge. A dev push must carry each new merge's version tag. A human can still
 hand-write the note in their own clone, as they can skip any hook; the forge
 proof is what catches it.
+
+A gate result can come from the gate result store (`lib/gatestore.sh`,
+under the git common dir, shared by every work tree): a run keyed by the
+exact tree the gate judged and by the gatecfg (a hash of the conf's gate
+keys and every `gate_paths` file). Land reuses only a green record with the
+same tree, gatecfg and command, and says so in the receipt: `Gates:
+fast=pass full=pass (pre-gated <tree>)`, or `(pre-gated <tree>: fast)` when
+one gate came from the store. A red record is never reused; a miss always
+gates. The store never feeds pre-push or `neo doctor --prove`, which rerun
+the gates themselves.
 
 ## Requirements register
 
@@ -307,11 +360,13 @@ Requirements, Units of Intent, Scrapped), generated from
 | `max_commit_lines` | most lines one lane commit may change, added plus deleted (commit audit) | 800 |
 | `commit_body` | `required`: a change commit carries a body line of five words or more; `optional` drops the rule | required |
 | `requirement_proof` | `required`: a requirement states eight words or more and a `Proof:` line naming a file in the lane tip (or `S<nn>`), or `Untested:`; `optional` drops the rule | required |
+| `docs_rules` | comma-separated `<code glob>=<doc glob>` pairs: a lane changing code matching one changes a doc matching its pair, or its requirement says `Docs: none (<reason>)`; the merge records which (land) | unset |
 | `test_paths` | shell patterns of test paths, space separated; a behaviour change touches one (commit audit) | `test/* tests/* */test/* */tests/* spec/* */spec/* *_test.* *.test.* *_spec.* test_*` |
 | `gates_fast` | command run on every lane commit and on the merge tree | none |
 | `gates_full` | command run on the merge tree before the merge exists; a lane's own conf must set it (`none` lands without one, with a warning), and a dev without it lands only a lane that sets it | none |
 | `gates_release` | command run on dev's tip before a release | none |
-| `land_pr` | `required` makes review mandatory (`neo land --pr`); on a forge `neo setup --remote` then adds GitHub's review rule and the neo-check status to dev's ruleset | optional |
+| `gate_paths` | comma-separated files the gates read besides the tree's own (an absolute path, or a path in the tree); their content joins the gatecfg key of stored gate results, so a changed gate script is never answered by an old result | unset |
+| `land_pr` | `required` makes review mandatory (`neo land --pr`); on a forge `neo setup --remote` then adds GitHub's review rule and the neo-check status to the dev-only `neo-review` ruleset | optional |
 | `land_approvals` | approvals given on the exact merge commit that `neo land --pr` waits for, and the forge's review rule requires (0 to 10) | 1 |
 | `forge_repo` | OWNER/REPO when origin's URL does not name it | from origin |
 | `tracker` | may only be `none`; a command tracker is operator-only | none |
@@ -340,5 +395,9 @@ No tracked file holds a real person's home or session path or an email address o
 
 The docs state only what the code holds: the verbs and their flags (README's
 command table), the invariant ids, the conf keys, the kinds and commit tags,
-and the scenario ids and counts are read from the code and checked against
-the docs by `.neo/lint/docs.sh`, run by every gate.
+the subject limits, the policy defaults, the exit codes, the FLOWS section
+of every verb, the files DESIGN's Layout names, and the scenario ids and
+counts are read from the code and checked against the docs by
+`.neo/lint/docs.sh`, run by every gate. A consumer ties its own code to its
+own docs with `docs_rules` (land refuses a lane that changes the code and
+not the doc, unless its requirement says `Docs: none (<reason>)`).

@@ -1,0 +1,8 @@
+{
+  "name": "neo-vault-readonly",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/heads/vault/*", "refs/heads/vault/*/*"], "exclude": [] } },
+  "rules": [ { "type": "update" }, { "type": "deletion" } ],
+  "bypass_actors": [ { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" } ]
+}

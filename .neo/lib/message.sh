@@ -3,6 +3,10 @@
 # commit-msg hook, land's per-commit check and doctor --history.
 
 NEO_TAGS="NEW FIX REFACTOR DOCS TEST REVERT HOTFIX"
+# the subject limits, named once: lint/docs.sh checks every doc that states them
+NEO_SUBJ_MIN=12
+NEO_SUBJ_MAX=72
+NEO_MERGE_SUBJ_MAX=140
 
 # neo_msg_violations FILE [merge]: prints one line per broken rule; empty
 # output means the message passes. Comment lines (#) are ignored.
@@ -15,7 +19,7 @@ neo_msg_violations() {
   if [ "$kind" = merge ]; then
     [[ "$subj" =~ ^\[MERGE\]\ [a-z]+/[a-z0-9][a-z0-9-]*\ into\ dev:\ v[0-9]{4}\.[0-9]+\.[0-9]+$ ]] \
       || echo "subject must read '[MERGE] <kind>/<slug> into dev: vYYYY.S.N'"
-    [ "$len" -le 140 ] || echo "subject is $len chars (merge max 140)"
+    [ "$len" -le "$NEO_MERGE_SUBJ_MAX" ] || echo "subject is $len chars (merge max $NEO_MERGE_SUBJ_MAX)"
     local mbody
     mbody=$(printf '%s\n' "$body" | sed '1,2d' | grep -vE '^[A-Z][A-Za-z-]+: ' || true)
     [ -n "$(printf '%s\n' "$mbody" | sed -n 1p | sed 's/^[[:space:]]*//')" ] && [[ "$(printf '%s\n' "$mbody" | sed -n 1p)" != "- "* ]] \
@@ -28,7 +32,7 @@ neo_msg_violations() {
     else
       [[ "$subj" =~ ^\[[A-Z]+\]\ [A-Z0-9] ]] || echo "subject text starts with a capital letter or digit"
     fi
-    [ "$len" -ge 12 ] && [ "$len" -le 72 ] || echo "subject is $len chars (12 to 72)"
+    [ "$len" -ge "$NEO_SUBJ_MIN" ] && [ "$len" -le "$NEO_SUBJ_MAX" ] || echo "subject is $len chars ($NEO_SUBJ_MIN to $NEO_SUBJ_MAX)"
     # a change says what it does and why: a body line of five words that is not the subject again
     case "$tag" in NEW|FIX|REFACTOR|REVERT|HOTFIX)
       if neo_rule_on commit-body && [ "$(neo_conf commit_body required 2>/dev/null || echo required)" != optional ]; then

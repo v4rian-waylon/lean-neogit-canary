@@ -121,49 +121,117 @@ neo_trailer() {
 }
 
 # Safety anchors ("safety anchors stay forever"). Every lane keeps the commit
-# it forked from under refs/safety/<kind>/<name> for the life of the
-# repository: neo lane writes it at the fork point, every push that carries
-# the lane carries it (pre-push, land, lane --close), and nothing deletes or
-# moves it (pre-push, the agent guard). The ref names an annotated tag
-# object, so it records who forked when. A lane made by hand or before
-# anchors existed gets one at the point it leaves dev when it is first pushed
-# or landed.
+# it forked from for the life of the repository, on a branch as in neo-git,
+# so forge rulesets cover it: refs/heads/safety/<kind>/<name> names an anchor
+# commit whose only parent is the fork point and whose message, author and
+# date record the lane and who started it when (a commit per lane, so two
+# lanes forked from one dev tip never share an anchor). neo lane writes it,
+# every push that carries the lane carries it (pre-push, land, lane --close),
+# and nothing deletes or moves it (pre-push, the agent guard, the
+# neo-safety-lockdown ruleset). A lane made by hand or before anchors existed
+# gets one where it leaves dev when it is first pushed or landed.
+# Anchors written before they were branches (refs/safety/<kind>/<name>, an
+# annotated tag object) are still read, kept, and migrated to the same
+# branch commit on every clone (neo_anchor_migrate is deterministic).
 NEO_ZERO=0000000000000000000000000000000000000000
-# neo_anchor_ref REF -> refs/safety/<kind>/<name> for lane/<kind>/<name> or attic/<kind>/<name>.
+# neo_anchor_ref REF -> refs/heads/safety/<kind>/<name> for lane/<kind>/<name> or attic/<kind>/<name>.
 neo_anchor_ref() {
   local r="${1#refs/heads/}"
   r="${r#lane/}"; r="${r#attic/}"
-  printf 'refs/safety/%s' "$r"
+  printf 'refs/heads/safety/%s' "$r"
+}
+# neo_anchor_legacy REF -> the anchor's earlier ref, refs/safety/<kind>/<name>.
+neo_anchor_legacy() { local a; a=$(neo_anchor_ref "$1"); printf 'refs/safety/%s' "${a#refs/heads/safety/}"; }
+# neo_anchor_commit NAME FORK: a new anchor commit for <kind>/<name> on FORK (no ref written).
+neo_anchor_commit() {
+  local fork; fork=$(git rev-parse "$2^{commit}")
+  git commit-tree "$fork^{tree}" -p "$fork" -m "neo lane $1: fork point $fork"
+}
+# neo_anchor_migrate OBJ: the anchor commit an earlier annotated anchor OBJ
+# becomes, the same on every clone (its tagger and date become the commit's).
+neo_anchor_migrate() {
+  local fork name who
+  fork=$(git rev-parse "$1^{commit}")
+  name=$(git cat-file -p "$1" | sed -nE 's/^tag safety\/(.*)$/\1/p' | sed -n 1p)
+  who=$(git cat-file -p "$1" | sed -nE 's/^tagger (.*) <([^>]*)> ([0-9]+ [-+][0-9]{4})$/\1\t\2\t\3/p' | sed -n 1p)
+  local n e d; IFS=$'\t' read -r n e d <<<"$who"
+  GIT_AUTHOR_NAME="$n" GIT_AUTHOR_EMAIL="$e" GIT_AUTHOR_DATE="$d" \
+  GIT_COMMITTER_NAME="$n" GIT_COMMITTER_EMAIL="$e" GIT_COMMITTER_DATE="$d" \
+    git commit-tree "$fork^{tree}" -p "$fork" -m "neo lane $name: fork point $fork"
+}
+# neo_anchor_fork REF: the fork point REF's anchor records (empty when none).
+neo_anchor_fork() {
+  local a; a=$(neo_anchor_ref "$1")
+  if git rev-parse -q --verify "$a^1" 2>/dev/null; then return 0; fi
+  git rev-parse -q --verify "$(neo_anchor_legacy "$1")^{commit}" 2>/dev/null || true
+}
+# neo_refs_migrate: every earlier refs/safety/* and refs/vault/* this clone
+# holds gets its branch (refs/heads/safety/..., refs/heads/vault/...); the
+# earlier refs stay, never deleted.
+neo_refs_migrate() {
+  local r o b
+  for r in $(git for-each-ref --format='%(refname)' refs/safety refs/vault); do
+    case "$r" in refs/safety/*) b="refs/heads/safety/${r#refs/safety/}" ;; *) b="refs/heads/vault/${r#refs/vault/}" ;; esac
+    git rev-parse -q --verify "$b" >/dev/null && continue
+    o=$(git rev-parse "$r")
+    if [ "$(git cat-file -t "$o")" = tag ] && [[ "$r" == refs/safety/* ]]; then
+      git update-ref "$b" "$(neo_anchor_migrate "$o")" "$NEO_ZERO" 2>/dev/null || true
+    else
+      git update-ref "$b" "$(git rev-parse "$o^{commit}")" "$NEO_ZERO" 2>/dev/null || true
+    fi
+  done
+  return 0
 }
 # neo_anchor_make REF FORK [REMOTE]: write REF's anchor at FORK unless one
-# exists; prints the anchor ref. With REMOTE, an anchor the remote already
-# holds (a lane shared from another clone) is fetched instead of written.
+# exists (an earlier anchor is migrated); prints the anchor ref. With REMOTE,
+# an anchor the remote already holds (a lane shared from another clone) is
+# fetched instead of written.
 neo_anchor_make() {
-  local ref obj fork name
-  ref=$(neo_anchor_ref "$1"); name="${ref#refs/safety/}"
-  if [ -n "${3:-}" ] && ! git rev-parse -q --verify "$ref" >/dev/null \
-     && [ -n "$(git ls-remote "$3" "$ref" 2>/dev/null || true)" ]; then
-    git fetch -q --no-tags "$3" "$ref:$ref" 2>/dev/null || true
+  local ref name leg
+  ref=$(neo_anchor_ref "$1"); name="${ref#refs/heads/safety/}"; leg=$(neo_anchor_legacy "$1")
+  if [ -n "${3:-}" ] && ! git rev-parse -q --verify "$ref" >/dev/null; then
+    if [ -n "$(git ls-remote "$3" "$ref" 2>/dev/null || true)" ]; then
+      git fetch -q --no-tags "$3" "$ref:$ref" 2>/dev/null || true
+    elif ! git rev-parse -q --verify "$leg" >/dev/null && [ -n "$(git ls-remote "$3" "$leg" 2>/dev/null || true)" ]; then
+      git fetch -q --no-tags "$3" "$leg:$leg" 2>/dev/null || true
+    fi
+  fi
+  if ! git rev-parse -q --verify "$ref" >/dev/null && git rev-parse -q --verify "$leg" >/dev/null; then
+    git update-ref "$ref" "$(neo_anchor_migrate "$(git rev-parse "$leg")")" "$NEO_ZERO" 2>/dev/null || true
   fi
   if ! git rev-parse -q --verify "$ref" >/dev/null; then
-    obj=$(neo_anchor_object "$name" "$2")
     # create only: when another work tree wrote it a moment ago, that one stands
-    git update-ref "$ref" "$obj" "$NEO_ZERO" 2>/dev/null || true
+    git update-ref "$ref" "$(neo_anchor_commit "$name" "$2")" "$NEO_ZERO" 2>/dev/null || true
   fi
   printf '%s' "$ref"
 }
-# neo_anchor_object NAME FORK: a new anchor tag object for <kind>/<name> on FORK (no ref written).
-neo_anchor_object() {
-  local fork; fork=$(git rev-parse "$2^{commit}")
-  printf 'object %s\ntype commit\ntag safety/%s\ntagger %s\n\nneo lane %s: fork point %s\n' \
-    "$fork" "$1" "$(git var GIT_COMMITTER_IDENT)" "$1" "$fork" | git mktag
+# Vault refs. A safety anchor points at a lane's start; its vault branch at
+# its end: neo land writes refs/heads/vault/<kind>/<name> on the lane's tip
+# as it landed (the merge's second parent), in the land's atomic push, as
+# neo-git vaulted a merged pool. Like an anchor it stays forever: pre-push,
+# the agent guard and the neo-vault-readonly ruleset refuse deleting or moving
+# one, and sync --dev publishes those of offline lands. A re-land keeps the
+# vault branch of the lane's first land. Earlier refs/vault/* refs are read
+# and migrated like anchors.
+# neo_vault_ref REF -> refs/heads/vault/<kind>/<name>.
+neo_vault_ref() { local a; a=$(neo_anchor_ref "$1"); printf 'refs/heads/vault/%s' "${a#refs/heads/safety/}"; }
+# neo_number_ref NUMBER -> its reservation, refs/heads/safety/numbers/NUMBER
+# (an earlier refs/safety/numbers/NUMBER is migrated to it).
+neo_number_ref() {
+  local b="refs/heads/safety/numbers/$1" l="refs/safety/numbers/$1"
+  if ! git rev-parse -q --verify "$b" >/dev/null && git rev-parse -q --verify "$l" >/dev/null; then
+    if [ "$(git cat-file -t "$l")" = tag ]; then
+      git update-ref "$b" "$(neo_anchor_migrate "$(git rev-parse "$l")")" "$NEO_ZERO" 2>/dev/null || true
+    fi
+  fi
+  printf '%s' "$b"
 }
 # neo_anchor_refs REF: the refs that travel with lane REF: its anchor and,
-# when it is numbered and reserved here, refs/safety/numbers/<number>.
+# when it is numbered and reserved here, its number's reservation.
 neo_anchor_refs() {
-  local n; neo_anchor_ref "$1"; printf '\n'
+  local n k; neo_anchor_ref "$1"; printf '\n'
   n=$(neo_lane_number "$1")
-  if [ -n "$n" ] && git rev-parse -q --verify "refs/safety/numbers/$n" >/dev/null; then printf 'refs/safety/numbers/%s\n' "$n"; fi
+  if [ -n "$n" ]; then k=$(neo_number_ref "$n"); git rev-parse -q --verify "$k" >/dev/null && printf '%s\n' "$k"; fi
   return 0
 }
 

@@ -20,10 +20,12 @@ agent follows the steps literally; every refusal names the next command.
    run under the agent row of `.neo/identity-map` stamped with the session's
    model, with nothing exported by hand (set `NEO_MODEL` when the session
    names no model, `NEO_AGENT_EMAIL` when the map lists several agents).
-4. On a forge: `neo setup --remote` applies the rulesets (dev and main, the
-   attic, the tags; with `land_pr=required` also GitHub's review rule and the
-   neo-check status on dev) and writes the neo-check workflow; commit it on a
-   lane. The workflow judges every candidate with dev's checker.
+4. On a forge: `neo setup --remote` applies the rulesets (dev and main, main
+   and `release/*` tags for the admins only, the attic, the tags, and
+   neo-git's safety-lockdown, vault-readonly and pool-deletions; with
+   `land_pr=required` also GitHub's review rule and the neo-check status on
+   dev only) and writes the neo-check workflow; commit it on a lane. The
+   workflow judges every candidate with dev's checker.
 
 ## Work on a change (one lane per concern)
 
@@ -34,7 +36,7 @@ agent follows the steps literally; every refusal names the next command.
    Requirements register); `REQUIREMENTS.md` follows by itself on commit.
    The lane is `lane/<kind>/n<N>.<slug>`: its number is reserved on origin,
    or carries this clone's id when origin is unreachable, so it is never
-   shared. Its fork point is anchored at `refs/safety/<kind>/n<N>.<slug>`
+   shared. Its fork point is anchored at `safety/<kind>/n<N>.<slug>`
    for good; every push of the lane carries the anchor and the number.
 2. Commit in atomic steps; a change and its test together. A test written
    first and red on purpose carries `Red: <test>` and the next commit turns it
@@ -51,7 +53,10 @@ agent follows the steps literally; every refusal names the next command.
 4. `neo land`: policy, staleness, size, every commit's message and author,
    the fast gate on every commit, the merge built in a private worktree and
    both gates run on the merge tree, then one merge, one tag, one atomic push
-   that also deletes the lane on origin.
+   (dev, the tag, the anchor, the number and the vault branch). Apart, it
+   deletes the lane on origin; where only admins may (neo-pool-deletions)
+   the lane stays, listed by `neo status` and `neo doctor`, until an admin
+   runs `neo lane --retire`.
 
 ## When dev moved under you
 
@@ -72,7 +77,27 @@ agent follows the steps literally; every refusal names the next command.
 - The slug landed elsewhere first: `neo lane --rename <new-slug>`, then sync
   and land.
 
-## Offline
+## Parallel agents (the merge train)
+
+Lands take the shared land lock one at a time; their gates need not.
+
+1. Each agent, its lane committed: `neo train add` queues the lane at the
+   end of the train (`<git common dir>/neo/train`) and predicts the whole
+   train: each lane is rebased, as `neo sync` would, onto the predicted
+   merge of the lanes before it (the first onto dev), and the fast gate on
+   every predicted commit and both gates on each predicted merge tree run
+   in parallel, stored by tree. No ref moves. `neo train` lists the train
+   and which lanes are pre-gated; `neo train predict` reruns the
+   prediction; `neo land --predict <base>` predicts one lane on any base.
+2. In train order, under the lock: `neo sync`, then `neo land`. The rebased
+   commits and the merge tree are exactly the predicted ones, so land finds
+   every gate green in the store, re-verifies the tree, merges, tags and
+   pushes in seconds, records `Gates: fast=pass full=pass (pre-gated
+   <tree>)` and takes the lane out of the train.
+3. A predecessor that changed or failed changes the successors' trees: their
+   predictions miss and their lands gate as always. A changed gate command
+   or `gate_paths` file misses too; a red stored run is never reused.
+
 
 - `neo land` with origin unreachable lands locally and says so.
 - Back online: `neo sync --dev`. It fast-forwards to origin, publishes local
@@ -112,6 +137,15 @@ what the forge answered.
    the lane, in one push. Never use the merge button. With `land_pr=required`
    GitHub itself refuses dev moving to a commit without the approvals and the
    neo-check status.
+
+With `land_pr=required` GitHub's review rule refuses every push to dev, so
+steps 1 and 3 change: the PR head is the lane tip the gates ran on
+(approvals and the neo-check and commit-audit statuses count on that sha),
+and once they hold `neo land --pr` merges through GitHub's merge API with
+neo's own subject and body (merge-once), checks that the merge's parents
+are the old dev and the tested head, its tree the Tested-Tree and its
+subject neo's, and only then tags it and pushes the tag. A mismatch leaves
+the tag off and says so. The forge's merge button is still never used.
 
 ## Release
 
@@ -159,19 +193,25 @@ atomic push. The next land opens the next series.
 - Park a lane: `neo lane --close "<reason>"` (to `attic/`, reason as a git
   note); `neo lane --restore attic/<kind>/<slug>` brings it back.
 - Every lane ever started, in creation order, landed, open or abandoned:
-  `git for-each-ref --format='%(refname:lstrip=3) %(creatordate:iso)
-  %(contents:subject)' refs/safety/numbers` (after `git fetch origin
-  'refs/safety/*:refs/safety/*'`).
-- Where did a lane start: `git rev-parse refs/safety/<kind>/<slug>^{commit}`
-  (fetch the anchors first with `git fetch origin
-  'refs/safety/*:refs/safety/*'`). Anchors are never deleted or moved.
+  `git for-each-ref --format='%(refname:lstrip=4) %(committerdate:iso)
+  %(contents:subject)' refs/remotes/origin/safety/numbers` (a plain `git
+  fetch` brings the safety and vault branches).
+- Where did a lane start: `git rev-parse origin/safety/<kind>/<slug>^1`.
+  Anchors are never deleted or moved.
+- Where did a landed lane end: `git rev-parse origin/vault/<kind>/<slug>`;
+  never deleted or moved either.
+- Landed lanes still on origin (a forge where only admins delete lanes):
+  `neo status` lists them; an admin runs `neo lane --retire`.
 - An agent's destructive git (reset --hard, branch -D, rebase, force push)
   needs `<hooks>/neo/git-preflight.sh <repo> "<reason>"` first; the guard's
   deny says exactly what to run.
 - `neo status` (`--json` for tools): where you are, open lanes, last
   version, a pending re-land. `neo doctor`: the install (`--fix` repairs the
-  hooks setting); `neo doctor --history [--since REV]`: I1 to I9;
-  `neo doctor --prove [SINCE]`: every merge's gates rerun on its own tree.
+  hooks setting); `neo doctor --history [--since REV]`: I1 to I9, and every exception the
+  rules let land (`Bulk:`, `Untested:`, `Gate-Change:`, `Docs: none`, no
+  gate) counted with its versions;
+  `neo doctor --prove [SINCE]`: every merge's gates rerun on its own tree,
+  and every release's gate on the released tree.
 - `neo <verb> -h` prints that verb's usage.
 - A clone that never ran `neo setup`: `neo lane`, `land`, `sync` and
   `release` refuse and name it; `neo status` says what is missing; `check`,

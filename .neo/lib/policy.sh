@@ -9,6 +9,8 @@
 #                            line of five words or more (default required)
 #   requirement_proof=required|optional  required: a lane's requirement states eight words or more and a
 #                            Proof: <path or S<nn>> line naming what proves it in the lane tip (default required)
+#   docs_rules=c=d,c2=d2     pairs <code glob>=<doc glob>: a lane changing code matching c changes a doc matching
+#                            d, or its requirement says Docs: none (<reason>); the merge records which (default unset)
 #   land_pr=optional|required  required: a land goes through review (neo land --pr)
 #   land_approvals=N         approving reviews land --pr waits for (default 1)
 #   forge_repo=OWNER/REPO    the forge repository when origin's URL does not name it
@@ -23,9 +25,15 @@
 #   gates_fast=<command>     run on every lane commit by check --each
 #   gates_full=<command>     run on the merge tree before a land
 #   gates_release=<command>  run on dev before a release
+#   gate_paths=p1,p2         files the gates read besides the tree's own (an absolute path, or a path in the
+#                            tree): their content joins the gatecfg key of stored gate results (default unset;
+#                            lib/gatestore.sh)
 # A gate is one shell command run from the tree's root; exit 0 passes.
 # An empty gate passes and is reported as "none"; so does the explicit value
 # "none", which land requires for gates_full instead of an unset key.
+
+# the defaults, named once: lint/docs.sh checks RULES' policy table against them
+NEO_MAX_COMMITS_DEFAULT=20
 
 neo_policy_may_land() {
   local who email list
@@ -78,7 +86,7 @@ neo_policy_may_release() {
 }
 
 neo_policy_max_commits() {
-  local m; m=$(neo_conf max_commits 20)
+  local m; m=$(neo_conf max_commits "$NEO_MAX_COMMITS_DEFAULT")
   [[ "$m" =~ ^[0-9]{1,4}$ ]] && [ "$m" -ge 1 ] || NEO_RC=2 neo_die "max_commits='$m' must be 1 to 9999"
   printf '%s' "$m"
 }
@@ -96,16 +104,58 @@ neo_gate_missing() {
   done
 }
 
+# neo_path_in GLOBS PATH: 0 when PATH matches one of the comma-separated GLOBS.
+neo_path_in() {
+  local g gs
+  # split on commas only: a glob is never expanded against the work tree
+  IFS=, read -r -a gs <<<"$1"
+  for g in ${gs[@]+"${gs[@]}"}; do
+    g="${g#"${g%%[![:space:]]*}"}"; g="${g%"${g##*[![:space:]]}"}"
+    [ -n "$g" ] || continue
+    # shellcheck disable=SC2053
+    [[ "$2" == $g ]] && return 0
+  done
+  return 1
+}
+
+# neo_docs_named BASE TIP REQFILE: with docs_rules set, a lane that changes
+# code matching a rule's code glob changes a doc matching its doc glob, or
+# its requirement says "Docs: none (<reason>)". Prints the merge trailer
+# ("Docs: <doc>, ..." or "Docs: none (<reason>)"), or on rc 1 the reason.
+neo_docs_named() {
+  local rules files r code doc hit need="" got="" why p rs
+  rules=$(neo_conf docs_rules "")
+  [ -n "$rules" ] || return 0
+  files=$(git diff --name-only --no-renames "$1" "$2" || true)
+  IFS=, read -r -a rs <<<"$rules"
+  for r in ${rs[@]+"${rs[@]}"}; do
+    code="${r%%=*}"; doc="${r#*=}"; [ -n "$code" ] && [ -n "$doc" ] && [ "$code" != "$r" ] || continue
+    hit=""; while IFS= read -r p; do [ -n "$p" ] && neo_path_in "$code" "$p" && hit=1; done <<<"$files"
+    [ -n "$hit" ] || continue
+    hit=""; while IFS= read -r p; do [ -n "$p" ] && neo_path_in "$doc" "$p" && { hit="$p"; break; }; done <<<"$files"
+    if [ -n "$hit" ]; then got="$got, $hit"; else need="$need $code=$doc"; fi
+  done
+  if [ -n "$need" ]; then
+    why=$(sed -nE 's/^Docs: none \((.+)\)$/\1/p' "$3" | sed -n 1p)
+    [ -n "$why" ] && { echo "Docs: none ($why)"; return 0; }
+    echo "the lane changes code its docs describe and no doc:$need; change the doc, or say 'Docs: none (<reason>)' in the requirement"; return 1
+  fi
+  [ -z "$got" ] || echo "Docs: ${got#, }"
+}
+
 # neo_gate NAME DIR: run gates_NAME in DIR; prints pass|fail|none, rc 0 unless fail.
+# With NEO_GATE_TREE set (DIR holds that tree), the run, green or red, is
+# recorded in the gate result store (lib/gatestore.sh).
 neo_gate() {
-  local name="$1" dir="$2" cmd rc=0 log
+  local name="$1" dir="$2" cmd rc=0 log t0
   cmd=$(neo_conf "gates_$name" "")
   if [ -z "$cmd" ] || [ "$cmd" = none ]; then echo none; return 0; fi
-  log=$(mktemp "${TMPDIR:-/tmp}/neo-gate-$name.XXXXXX")
+  log=$(mktemp "${TMPDIR:-/tmp}/neo-gate-$name.XXXXXX"); t0=$(date +%s)
   # The gate is the project's own command: it runs without neo's internal
   # state (NEO_CONF_REV names a revision of this repository, which a test
   # suite driving other repositories must not inherit).
-  ( cd "$dir" && unset NEO_CONF_REV NEO_OFFLINE NEO_RELAND_STEP && sh -c "$cmd" ) >"$log" 2>&1 || rc=$?
+  ( cd "$dir" && unset NEO_CONF_REV NEO_OFFLINE NEO_RELAND_STEP NEO_GATE_TREE NEO_GATE_STORE && sh -c "$cmd" ) >"$log" 2>&1 || rc=$?
+  [ -z "${NEO_GATE_TREE:-}" ] || neo_store_put "$name" "$NEO_GATE_TREE" "$cmd" "$rc" "$(( $(date +%s) - t0 ))" "$log"
   if [ "$rc" = 0 ]; then rm -f "$log"; echo pass; return 0; fi
   # the end of the log: a test runner prints its failures and counts last
   tail -n 25 "$log" | sed 's/^/    | /' >&2; rm -f "$log"
@@ -126,7 +176,9 @@ neo_check_each() {
   for c in $(git rev-list --reverse "$base..$tip"); do
     git -C "$wt" checkout -q --detach "$c"
     subj=$(git log -1 --format=%s "$c"); red=$(neo_trailer "$c" Red)
-    if r=$(neo_gate fast "$wt" 2>/dev/null); then
+    # land and the train read and fill the gate result store (NEO_GATE_STORE=1);
+    # check --each and pre-push run every gate themselves
+    if r=$(if [ "${NEO_GATE_STORE:-}" = 1 ] && declare -F neo_gate_stored >/dev/null; then neo_gate_stored fast "$wt" "$(git rev-parse "$c^{tree}")"; else neo_gate fast "$wt"; fi 2>/dev/null); then
       if [ -n "$red" ]; then
         neo_info "  FAIL  $(git rev-parse --short "$c") $subj: stale Red: marker, the fast gate passes (Red: $red)"; fails=1
       else

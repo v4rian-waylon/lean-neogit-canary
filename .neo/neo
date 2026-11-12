@@ -17,6 +17,7 @@
 #   neo lane --close REASON [LANE]     move a lane to attic/ with the reason as a note
 #   neo lane --restore ATTIC_REF       move an attic lane back to lane/
 #   neo lane --rename NEW_SLUG         give the current lane a new slug (requirements file follows)
+#   neo lane --retire [LANE...]        an admin deletes landed lanes still on origin (the forge lets only admins)
 #   neo check [--gate NAME] [--each]   run a gate on the work tree, or the commit audit and the fast gate on
 #                                      every lane commit
 #   neo check --reqs [--write]         REQUIREMENTS.md against the register requirements/ generates
@@ -28,6 +29,11 @@
 #   neo land [-F BODY] [--dry-run]     merge the current lane into dev once, tagged and pushed atomically
 #   neo land --pr [-F BODY]            open or update the lane's PR (body = the merge body); once it has
 #                                      land_approvals approvals, land it the same way (exit 3 while waiting)
+#   neo land --predict BASE            gate, ahead of the land, the exact commits and merge tree a land on
+#                                      top of BASE would write (stored by tree; no ref moves)
+#   neo train [add|drop [LANE]|predict] the merge train: list the queued lanes in landing order; add (the
+#                                      current lane by default) queues and predicts; predict gates every
+#                                      queued lane in parallel, each on its predecessors' predicted merges
 #   neo sync                           rebase the current lane onto dev behind a preflight ref, lease-push it
 #   neo sync --dev [--continue|--abort] reconcile local dev with origin: fast-forward, publish, or re-land
 #                                      (a stopped re-land resumes with --continue; --abort parks the rest in the attic)
@@ -54,7 +60,7 @@
 set -euo pipefail
 
 NEO_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for _l in core message version policy identity history tracker audit reqs; do
+for _l in core message version policy identity history tracker audit reqs gatestore; do
   # shellcheck source=/dev/null
   . "$NEO_SELF/lib/$_l.sh"
 done
@@ -161,11 +167,13 @@ _setup_agent() {
 # ruleset of that name exists; check.yml is written to
 # .github/workflows/neo-check.yml for a lane to commit. The rulesets refuse
 # deleting or rewriting dev, main and attic lanes and moving or deleting a
-# version or release tag; neo-main also refuses any update of main except by
-# the repository's admins (main is production: only the owner promotes); with
-# land_pr=required dev also takes GitHub's
-# review rule and the neo-check status (_render_ruleset). Landing stays a
-# push with the lander's credentials, of the approved PR head under review.
+# version or release tag; neo-main also refuses any update of main, and
+# neo-release-tags any new release/* tag, except by the repository's admins
+# (main is production: only the owner promotes); with land_pr=required the
+# dev-only neo-review ruleset also takes GitHub's review rule and the
+# neo-check status (_render_ruleset), so review never lands on main, where it
+# would refuse the owner's release push. Landing stays a push with the
+# lander's credentials, of the approved PR head under review.
 _setup_remote() {
   local repo="" dry=false root url f name id wf
   while [ $# -gt 0 ]; do
@@ -212,8 +220,8 @@ _setup_remote() {
 }
 
 # _render_ruleset FILE: the ruleset as applied. With land_pr=required on
-# dev, neo-protected also carries GitHub's own review rule and the neo-check
-# status: dev moves only to the head of a pull request holding land_approvals
+# dev, neo-review (dev only, never main) also carries GitHub's own review rule
+# and the neo-check status: dev moves only to the head of a pull request holding land_approvals
 # approvals given after its last push (stale approvals dismissed), and only
 # when neo-check, run by dev's own checker, passed on that commit. The review
 # rule is the authority: a status can be produced by whatever workflow a
@@ -221,7 +229,7 @@ _setup_remote() {
 _render_ruleset() {
   local f="$1" req n rules
   req=$(NEO_CONF_REV=dev neo_conf land_pr optional 2>/dev/null || echo optional)
-  if [ "$req" = required ] && grep -q '"name": "neo-protected"' "$f"; then
+  if [ "$req" = required ] && grep -q '"name": "neo-review"' "$f"; then
     n=$(NEO_CONF_REV=dev neo_conf land_approvals 1)
     [[ "$n" =~ ^[0-9]{1,2}$ ]] && [ "$n" -le 10 ] || NEO_RC=2 neo_die "land_approvals='$n' must be 0 to 10 for the forge's review rule"
     rules='"rules": [ { "type": "deletion" }, { "type": "non_fast_forward" }, '
@@ -292,7 +300,7 @@ _slug_taken() {
 _number_max() {
   local m c
   m=$( { git log --first-parent --format='%(trailers:key=Lane-Number,valueonly)' dev 2>/dev/null || true
-         git for-each-ref --format='%(refname)' refs/safety refs/neo/origin-numbers refs/heads/lane refs/heads/attic \
+         git for-each-ref --format='%(refname)' refs/heads/safety refs/safety refs/neo/origin-numbers refs/heads/lane refs/heads/attic \
            refs/remotes/origin/lane refs/remotes/origin/attic | sed 's#.*/##'
        } | sed -nE 's/^n([0-9]+)(-[0-9a-f]{6})?([.].*)?$/\1/p' | sort -n | tail -n 1)
   c=$(git rev-list --first-parent --merges --count dev 2>/dev/null || echo 0)
@@ -312,25 +320,28 @@ _number_take() {
   if neo_has_remote && [ "$NEO_OFFLINE" != 1 ]; then online=1; fi
   while :; do
     tries=$((tries + 1)); [ "$tries" -le 20 ] || neo_die "could not reserve a lane number in 20 tries; run neo lane again"
-    if [ "$online" = 1 ] && ! git fetch -q --no-tags origin '+refs/safety/numbers/*:refs/neo/origin-numbers/*' 2>/dev/null; then
+    if [ "$online" = 1 ] && ! git fetch -q --no-tags origin '+refs/heads/safety/numbers/*:refs/neo/origin-numbers/*' \
+         '+refs/safety/numbers/*:refs/neo/origin-numbers/legacy/*' 2>/dev/null; then
       online=0
     fi
     n=$(( $(_number_max) + 1 ))
     if [ "$online" = 1 ] || ! neo_has_remote; then num="n$n"; else num="n$n-$(neo_clone_id | cut -c1-6)"; fi
     name="$kind/$num.$slug"
-    if [ -n "$have" ]; then obj=$(git rev-parse "$have"); else obj=$(neo_anchor_object "$name" "$fork"); fi
+    if [ -n "$have" ]; then obj=$(git rev-parse "$have"); else obj=$(neo_anchor_commit "$name" "$fork"); fi
     if [ "$online" = 1 ]; then
-      local refs="$obj:refs/safety/numbers/$num" lease="--force-with-lease=refs/safety/numbers/$num:"
-      [ -n "$have" ] || { refs="$refs $obj:refs/safety/$name"; lease="$lease --force-with-lease=refs/safety/$name:"; }
+      local refs="$obj:refs/heads/safety/numbers/$num" lease="--force-with-lease=refs/heads/safety/numbers/$num:"
+      [ -n "$have" ] || { refs="$refs $obj:refs/heads/safety/$name"; lease="$lease --force-with-lease=refs/heads/safety/$name:"; }
       # shellcheck disable=SC2086
       if ! git push -q --atomic $lease origin $refs </dev/null 2>/dev/null; then
-        git ls-remote --exit-code origin "refs/safety/numbers/$num" >/dev/null 2>&1 && continue
-        neo_warn "origin did not take the number $num; numbering this lane as offline work"
+        git ls-remote --exit-code origin "refs/heads/safety/numbers/$num" >/dev/null 2>&1 && continue
+        # a forge whose neo-safety-lockdown lets only admins create safety branches refuses a
+        # non-admin here: the number then carries this clone's id, as offline
+        neo_warn "origin did not take the number $num; numbering this lane as offline work (its anchor goes up with the lane, as an admin's push allows)"
         online=0; continue
       fi
     fi
-    git update-ref "refs/safety/numbers/$num" "$obj" "$NEO_ZERO" 2>/dev/null || continue
-    [ -n "$have" ] || git update-ref "refs/safety/$name" "$obj" "$NEO_ZERO"
+    git update-ref "refs/heads/safety/numbers/$num" "$obj" "$NEO_ZERO" 2>/dev/null || continue
+    [ -n "$have" ] || git update-ref "refs/heads/safety/$name" "$obj" "$NEO_ZERO"
     break
   done
   printf '%s' "$num"
@@ -343,14 +354,16 @@ _lane_number_of() {
   an=$(neo_anchor_ref "$lane")
   num=$(neo_lane_number "$lane")
   if [ -n "$num" ]; then
-    k=$(git rev-parse -q --verify "refs/safety/numbers/$num") \
+    neo_anchor_make "$lane" "$(git merge-base dev "$lane" 2>/dev/null || git rev-parse "$lane")" >/dev/null
+    k=$(git rev-parse -q --verify "$(neo_number_ref "$num")") \
       || neo_die "$lane names $num, which no reservation in this clone holds; lane numbers come from neo lane (start the lane with it)"
     [ "$k" = "$(git rev-parse -q --verify "$an" || true)" ] \
-      || neo_die "$num belongs to another lane ($(git for-each-ref --format='%(contents:subject)' "refs/safety/numbers/$num")); lane numbers are never shared (I7)"
+      || neo_die "$num belongs to another lane ($(git log -1 --format=%s "refs/heads/safety/numbers/$num")); lane numbers are never shared (I7)"
     printf '%s' "$num"; return 0
   fi
   git rev-parse -q --verify "$an" >/dev/null || return 0
-  git for-each-ref --format='%(objectname) %(refname)' refs/safety/numbers \
+  neo_refs_migrate
+  git for-each-ref --format='%(objectname) %(refname)' refs/heads/safety/numbers \
     | awk -v o="$(git rev-parse "$an")" '$1 == o { sub(/.*\//, "", $2); print $2; exit }'
 }
 
@@ -400,6 +413,7 @@ cmd_lane() {
     --close) shift; _lane_close "$@"; return ;;
     --restore) shift; _lane_restore "$@"; return ;;
     --rename) shift; _lane_rename "$@"; return ;;
+    --retire) shift; _lane_retire "$@"; return ;;
     ""|-h|--help) usage 2 ;;
   esac
   local kind="$1" slug="${2:-}" req="" ticket="" proof="" root
@@ -442,7 +456,7 @@ cmd_lane() {
   } > "requirements/$slug.md"
   git add -- "requirements/$slug.md"
   [ -z "$ticket" ] || neo_tracker_call link "$ticket" --branch "lane/$kind/$num.$slug" >/dev/null || true
-  neo_info "lane/$kind/$num.$slug started at dev ($(git rev-parse --short dev)), anchored at refs/safety/$kind/$num.$slug; requirements/$slug.md is staged with your first commit"
+  neo_info "lane/$kind/$num.$slug started at dev ($(git rev-parse --short dev)), anchored at refs/heads/safety/$kind/$num.$slug; requirements/$slug.md is staged with your first commit"
 }
 
 _lane_close() {
@@ -460,7 +474,13 @@ _lane_close() {
     neo_anchor_make "$ref" "$(git merge-base dev "$to" 2>/dev/null || git rev-parse "$to")" origin >/dev/null
     for r in $(neo_anchor_refs "$ref"); do an="$an $r:$r"; done
     # shellcheck disable=SC2086
-    git push -q --atomic origin "$to:refs/heads/$to" ":refs/heads/$ref" 'refs/notes/neo:refs/notes/neo' $an || neo_warn "could not move the lane on origin; rerun when online"
+    if git push -q --atomic origin "$to:refs/heads/$to" 'refs/notes/neo:refs/notes/neo' $an; then
+      # apart, the lane itself: only an admin may delete it on a forge (neo-pool-deletions)
+      git push -q origin ":refs/heads/$ref" </dev/null 2>/dev/null \
+        || neo_warn "$ref stays on origin beside $to (an admin retires it with neo lane --retire)"
+    else
+      neo_warn "could not move the lane on origin; rerun when online"
+    fi
   fi
   neo_info "closed: $ref -> $to ($reason)"
 }
@@ -517,6 +537,39 @@ _lane_rename() {
     neo_anchor_make "$nl" "$base" >/dev/null
   fi
   neo_info "renamed $lane -> $nl; requirements/$new.md throughout; the old tip is kept at $pf and the old anchor $oan stays"
+}
+
+# _landed_live: origin's lanes that dev already holds (landed, not yet retired),
+# one per line; empty without origin or when it is unreachable.
+_landed_live() {
+  neo_has_remote || return 0
+  local sha ref d
+  d=$(git rev-parse -q --verify refs/remotes/origin/dev || git rev-parse -q --verify refs/heads/dev) || return 0
+  git ls-remote origin 'refs/heads/lane/*' 2>/dev/null | while read -r sha ref; do
+    git cat-file -e "$sha^{commit}" 2>/dev/null && git merge-base --is-ancestor "$sha" "$d" 2>/dev/null && printf '%s\n' "${ref#refs/heads/}"
+  done
+  return 0
+}
+
+# _lane_retire [LANE...]: delete on origin each named lane, or every landed
+# lane still there, that dev holds. Only a repository admin may delete a lane
+# on a forge (neo-pool-deletions); anyone else is refused there, and the lane
+# stays. A lane dev does not hold is never retired (close it instead).
+_lane_retire() {
+  local root l live d n=0 bad=0
+  root=$(neo_root); cd "$root"
+  neo_has_remote || neo_die "no origin; there is nothing to retire"
+  git fetch -q --no-tags origin '+refs/heads/dev:refs/remotes/origin/dev' 2>/dev/null || neo_die "origin is unreachable; lane --retire needs it"
+  live=$(_landed_live)
+  [ $# -gt 0 ] || set -- $live
+  for l in "$@"; do
+    l="${l#refs/heads/}"
+    grep -Fx -- "$l" <<<"$live" >/dev/null || { neo_warn "$l is not a landed lane on origin; not retired (close an unlanded lane instead)"; bad=1; continue; }
+    if git push -q origin ":refs/heads/$l" </dev/null 2>/dev/null; then n=$((n + 1)); neo_info "retired $l on origin"
+    else neo_warn "origin refused to delete $l (only a repository admin may)"; bad=1; fi
+  done
+  neo_info "lane --retire: $n lane(s) retired"
+  return "$bad"
 }
 
 _lane_restore() {
@@ -748,6 +801,7 @@ cmd_land() {
       -F) body_file="${2:-}"; shift 2 ;;
       --dry-run) dry=true; shift ;;
       --pr) pr=true; shift ;;
+      --predict) [ -n "${2:-}" ] || NEO_RC=2 neo_die "land --predict needs a base revision"; _land_predict "$2"; return ;;
       *) NEO_RC=2 neo_die "land: unknown argument $1" ;;
     esac
   done
@@ -762,8 +816,8 @@ cmd_land() {
     [ -n "$(grep -v '^#' "$body_file" | sed '/^[[:space:]]*$/d' || true)" ] || neo_die "body file $body_file is empty; write the merge body (a paragraph, then a '- ' list) or leave -F out for the default"
     # a final paragraph of 'Key: value' lines is trailers: they join the merge's trailer block
     extra=$(_body_trailers "$body_file")
-    if grep -E '^(Lane-Base|Requirement|Gates|Tested-Tree|Lane-Number|Ticket|Proof): ' <<<"$extra" >/dev/null; then
-      neo_die "body file $body_file sets a trailer neo land writes itself (Lane-Base, Requirement, Gates, Tested-Tree, Lane-Number, Ticket, Proof); drop it"
+    if grep -E '^(Lane-Base|Requirement|Gates|Tested-Tree|Lane-Number|Ticket|Proof|Docs|Untested): ' <<<"$extra" >/dev/null; then
+      neo_die "body file $body_file sets a trailer neo land writes itself (Lane-Base, Requirement, Gates, Tested-Tree, Lane-Number, Ticket, Proof, Docs, Untested); drop it"
     fi
   fi
   lane=$(neo_branch)
@@ -860,8 +914,15 @@ cmd_land() {
     neo_slug_landed "$rs" && neo_die "the lane changes requirements/$rs.md ($rq), which landed with $rs; landed requirements are never edited or deleted (I8)"
   done <<<"$(git diff --name-status --no-renames "$dev_tip" HEAD -- requirements/ || true)"
   local ticket; ticket=$(git show "HEAD:requirements/$slug.md" | sed -nE 's/^Ticket: ([A-Z][A-Z0-9]*-[0-9]+)$/\1/p' | sed -n 1p)
+  # code and the docs that describe it change together (docs_rules)
+  local docs rqf; rqf=$(mktemp "${TMPDIR:-/tmp}/neo-req.XXXXXX"); git show "HEAD:requirements/$slug.md" > "$rqf"
+  docs=$(neo_docs_named "$dev_tip" HEAD "$rqf") || { rm -f "$rqf"; neo_die "$docs"; }
+  rm -f "$rqf"
   git log --first-parent --format=%s dev | grep -E "^\[MERGE\] [a-z]+/$slug into dev: " >/dev/null && neo_die "slug '$slug' already landed (I7)"
   neo_info "-> check --each (fast gate on every lane commit)"
+  # land reads and fills the gate result store (lib/gatestore.sh): a gate green
+  # on the same tree under the same gatecfg (neo train ran it ahead) is not rerun
+  export NEO_GATE_STORE=1
   neo_check_each dev HEAD || neo_die "a lane commit fails the fast gate; fix it or mark a test-first commit with a Red: trailer"
   read -r v rel <<<"$(neo_version_last dev)"
   next=$(neo_version_next "$v" "$rel" "$(neo_year)")
@@ -873,9 +934,18 @@ cmd_land() {
     git worktree remove --force "$wt" >/dev/null 2>&1 || true
     neo_die "the merge does not apply cleanly; run 'neo sync'"
   fi
-  g_fast=$(neo_gate fast "$wt") || { git -C "$wt" merge --abort >/dev/null 2>&1 || true; git worktree remove --force "$wt" >/dev/null 2>&1 || true; neo_die "fast gate fails on the merge tree; dev unchanged"; }
-  g_full=$(neo_gate full "$wt") || { git -C "$wt" merge --abort >/dev/null 2>&1 || true; git worktree remove --force "$wt" >/dev/null 2>&1 || true; neo_die "full gate fails on the merge tree; dev unchanged"; }
+  # the merge tree is the tree the gates judge, and the key of their stored results
   tree=$(git -C "$wt" write-tree)
+  g_fast=$(neo_gate_stored fast "$wt" "$tree") || { git -C "$wt" merge --abort >/dev/null 2>&1 || true; git worktree remove --force "$wt" >/dev/null 2>&1 || true; neo_die "fast gate fails on the merge tree; dev unchanged"; }
+  g_full=$(neo_gate_stored full "$wt" "$tree") || { git -C "$wt" merge --abort >/dev/null 2>&1 || true; git worktree remove --force "$wt" >/dev/null 2>&1 || true; neo_die "full gate fails on the merge tree; dev unchanged"; }
+  [ "$(git -C "$wt" write-tree)" = "$tree" ] || { git -C "$wt" merge --abort >/dev/null 2>&1 || true; git worktree remove --force "$wt" >/dev/null 2>&1 || true; neo_die "a gate changed the staged merge tree; dev unchanged"; }
+  # a result taken from the store is said so: Gates: fast=pass full=pass (pre-gated <tree>)
+  local pregated=""
+  if [ "$g_fast $g_full" = "pass (stored) pass (stored)" ]; then pregated=" (pre-gated $tree)"
+  elif [ "$g_fast" = "pass (stored)" ]; then pregated=" (pre-gated $tree: fast)"
+  elif [ "$g_full" = "pass (stored)" ]; then pregated=" (pre-gated $tree: full)"
+  fi
+  g_fast="${g_fast% (stored)}"; g_full="${g_full% (stored)}"
   git -C "$wt" merge --abort >/dev/null 2>&1 || true
   git worktree remove --force "$wt" >/dev/null 2>&1 || true
   # the lane's fork point stays forever (a lane made before anchors gets one
@@ -891,7 +961,7 @@ cmd_land() {
     lnum=$(_lane_number_of "$lane")
     [ -n "$lnum" ] || lnum=$(_number_take "$kind" "$slug" "$dev_tip" "$anchor")
   fi
-  anchors="$anchor:$anchor refs/safety/numbers/$lnum:refs/safety/numbers/$lnum"
+  anchors="$anchor:$anchor refs/heads/safety/numbers/$lnum:refs/heads/safety/numbers/$lnum"
   msg=$(mktemp "${TMPDIR:-/tmp}/neo-merge.XXXXXX")
   {
     printf '[MERGE] %s/%s into dev: %s\n\n' "$kind" "$slug" "$next"
@@ -903,16 +973,18 @@ cmd_land() {
         "$(git show "HEAD:requirements/$slug.md" | sed -n '3p' | sed -E 's/[[:space:]]+$//')"
       git log --reverse --format='    - %h: %s' "dev..HEAD"
     fi
-    printf '\nLane-Base: %s\nRequirement: requirements/%s.md\nGates: fast=%s full=%s\nTested-Tree: %s\nLane-Number: %s\n' \
-      "$dev_tip" "$slug" "$g_fast" "$g_full" "$tree" "$lnum"
+    printf '\nLane-Base: %s\nRequirement: requirements/%s.md\nGates: fast=%s full=%s%s\nTested-Tree: %s\nLane-Number: %s\n' \
+      "$dev_tip" "$slug" "$g_fast" "$g_full" "$pregated" "$tree" "$lnum"
     [ -z "$ticket" ] || printf 'Ticket: %s\n' "$ticket"
     [ -z "$proof" ] || printf 'Proof: %s\n' "$proof"
+    [ -n "$proof" ] || git show "HEAD:requirements/$slug.md" | sed -nE 's/^(Untested: .+)$/\1/p' | sed -n 1p
+    [ -z "$docs" ] || printf '%s\n' "$docs"
     [ -z "$extra" ] || printf '%s\n' "$extra"
   } > "$msg"
   out=$(neo_msg_violations "$msg" merge; _body_thin "$msg")
   [ -z "$out" ] || { rm -f "$msg"; neo_die "merge message: $(tr '\n' ';' <<<"$out")"; }
   if $dry; then
-    neo_info "dry run: would land $lane as $next (gates fast=$g_fast full=$g_full), message:"; sed 's/^/  | /' "$msg"; rm -f "$msg"; return 0
+    neo_info "dry run: would land $lane as $next (gates fast=$g_fast full=$g_full$pregated), message:"; sed 's/^/  | /' "$msg"; rm -f "$msg"; return 0
   fi
   local forge_merged=0
   if $pr && [ "$(neo_conf land_pr optional)" = required ]; then
@@ -936,6 +1008,8 @@ cmd_land() {
     if [ -n "$olane" ] && [ "$(git rev-list --parents -n1 "$olane" 2>/dev/null)" = "$olane $dev_tip $(git rev-parse HEAD)" ] \
        && [ "$(git rev-parse "$olane^{tree}")" = "$tree" ]; then
       merge="$olane"
+      # the reused merge keeps its own message (its Gates receipt), so the PR body stays the merge body
+      git log -1 --format=%B "$merge" > "$msg"
     else
       merge=$(git commit-tree "$tree" -p "$dev_tip" -p HEAD -F "$msg")
     fi
@@ -949,33 +1023,129 @@ cmd_land() {
   rm -f "$msg"
   git tag -a "$next" -m "neo land $kind/$slug" "$merge" 2>/dev/null \
     || neo_die "another land took $next a moment ago; dev is unchanged. Run 'neo sync', then land again"
+  # the lane's end stays forever too: its vault branch (written once; a re-land keeps the first)
+  local vref vobj=""; vref=$(neo_vault_ref "$lane"); neo_refs_migrate
+  if ! git rev-parse -q --verify "$vref" >/dev/null; then
+    vobj=$(git rev-parse "$merge^2")
+    anchors="$anchors $vobj:$vref"
+  fi
   # the lane's fork point stays forever: a lane made before anchors gets one where it leaves dev
   local where="no remote, landed locally"
   if neo_has_remote && [ "$NEO_OFFLINE" = 1 ]; then
     where="origin unreachable, landed locally; 'neo sync --dev' publishes it when origin is back"
   elif neo_has_remote; then
-    local del="" lease=""
-    # the lane is deleted only where origin still holds what was landed
-    if [ -n "$olane" ]; then del=":refs/heads/$lane"; lease="--force-with-lease=refs/heads/$lane:$olane"; fi
-    # One atomic push: dev, the tag, the lane's anchor and number and the lane deletion land together or not at all.
+    # One atomic push: dev, the tag and the lane's anchor, number and vault branch land together or not at all.
     # After a merge through the PR, origin's dev already holds the merge: the push carries the rest.
     local devref="$merge:refs/heads/dev"; [ "$forge_merged" = 0 ] || devref=""
     # shellcheck disable=SC2086
-    if ! git push -q --atomic $lease origin $devref "refs/tags/$next" $anchors $del; then
+    if ! git push -q --atomic origin $devref "refs/tags/$next" $anchors; then
       git tag -d "$next" >/dev/null
       neo_die "push refused or the link dropped; nothing changed locally or on origin (dev, $next). Run 'neo sync' if dev moved, then land again"
     fi
     where="pushed"
+    # Then, apart, the landed lane is retired on origin, only where origin still holds what
+    # was landed. The neo-pool-deletions ruleset lets only admins delete a lane: for anyone
+    # else it stays, listed by neo status and neo doctor, until an admin runs neo lane --retire.
+    if [ -n "$olane" ]; then
+      if git push -q --force-with-lease="refs/heads/$lane:$olane" origin ":refs/heads/$lane" </dev/null 2>/dev/null; then
+        where="$where; $lane retired on origin"
+      else
+        where="$where; $lane stays on origin (landed; an admin retires it with neo lane --retire)"
+      fi
+    fi
   fi
+  [ -z "$vobj" ] || git update-ref "$vref" "$vobj" "$NEO_ZERO" 2>/dev/null || true
   _move_branch dev "$merge" "$dev_tip"
   if ! git switch -q dev 2>/dev/null; then git switch -q --detach "$merge"; fi
   git branch -q -D "$lane"
-  neo_info "landed $kind/$slug as $next ($(git rev-parse --short "$merge")); gates fast=$g_fast full=$g_full; $where"
+  neo_train_lanes | grep -Fx -- "$lane" >/dev/null && neo_train_edit drop "$lane"
+  neo_info "landed $kind/$slug as $next ($(git rev-parse --short "$merge")); gates fast=$g_fast full=$g_full$pregated; $where"
   [ -z "$ticket" ] || neo_tracker_call transition "$ticket" --to done --ref "$next" >/dev/null || neo_warn "ticket $ticket was not moved to done; the land stands"
   if [ -n "$pr_no" ]; then
     gh pr comment "$pr_no" --repo "$(_forge_repo)" --body "Landed by neo land as $next ($(git rev-parse --short "$merge"))." >/dev/null 2>&1 \
       || neo_warn "could not comment on PR #$pr_no"
   fi
+}
+
+# _land_predict BASE: neo land --predict. The current lane's commits as neo
+# sync would write them on BASE, and the merge tree neo land would write,
+# gated into the store (lib/gatestore.sh). Touches no ref.
+_land_predict() {
+  local root lane base p
+  root=$(neo_root); cd "$root"
+  lane=$(neo_branch)
+  neo_lane_parse "$lane" >/dev/null || neo_die "land --predict runs on a lane/<kind>/<number>.<slug> branch (on '${lane:-detached}')"
+  base=$(git rev-parse -q --verify "$1^{commit}") || NEO_RC=2 neo_die "land --predict: $1 names no commit"
+  _reqs_merge_attr || true
+  p=$(neo_predict "$lane" "$base") || neo_die "$lane does not rebase cleanly onto $(git rev-parse --short "$base"); neo sync will stop on the same conflict"
+  set -- $p
+  neo_info "predicted $lane on $(git rev-parse --short "$base"): merge tree $(git rev-parse --short "$1^{tree}")"
+  NEO_GATE_STORE=1 neo_pregate "$base" "$1" || neo_die "a gate fails on the predicted merge tree; the land would refuse"
+}
+
+# ---------------------------------------------------------------- train
+# neo train: the queued lanes in landing order (lib/gatestore.sh). Each lane
+# is predicted on its predecessors' predicted merges; predict gates them all
+# in parallel, and each land in order then finds its gates in the store.
+cmd_train() {
+  local root sub="${1:-list}" lane
+  root=$(neo_root); cd "$root"
+  case "$sub" in
+    list|predict) [ $# -le 1 ] || NEO_RC=2 neo_die "train $sub takes no argument" ;;
+    add|drop)
+      lane="${2:-$(neo_branch)}"; lane="${lane#refs/heads/}"
+      [ $# -le 2 ] || NEO_RC=2 neo_die "train $sub takes one lane at most" ;;
+    *) NEO_RC=2 neo_die "train: unknown argument $sub (add, drop, predict or nothing)" ;;
+  esac
+  case "$sub" in
+    add)
+      case "$lane" in lane/*) neo_lane_parse "$lane" >/dev/null && git rev-parse -q --verify "refs/heads/$lane" >/dev/null ;; *) false ;; esac         || neo_die "train add takes a lane/<kind>/<number>.<slug> branch (got '${lane:-detached}')"
+      neo_train_edit add "$lane"; neo_info "queued $lane (place $(neo_train_lanes | grep -nFx -- "$lane" | cut -d: -f1))"
+      _train_run true ;;
+    drop)
+      neo_train_lanes | grep -Fx -- "$lane" >/dev/null || neo_die "$lane is not in the train"
+      neo_train_edit drop "$lane"; neo_info "dropped $lane from the train" ;;
+    predict) _train_run true ;;
+    list) _train_run false ;;
+  esac
+}
+
+# _train_run GATE: walk the train in order, each lane predicted on the
+# previous predicted merge; GATE=true gates every lane in parallel into the
+# store, false only says what the store holds.
+_train_run() {
+  local gate="$1" base lane p tip i=0 out pids="" rc=0 d
+  base=$(git rev-parse dev)
+  # origin's dev as last fetched, when it is ahead: the land takes it first
+  if git rev-parse -q --verify refs/remotes/origin/dev >/dev/null && git merge-base --is-ancestor dev refs/remotes/origin/dev; then
+    base=$(git rev-parse refs/remotes/origin/dev)
+  fi
+  [ -n "$(neo_train_lanes)" ] || { neo_info "train: empty (neo train add queues the current lane)"; return 0; }
+  _reqs_merge_attr || true
+  d=$(neo_tmpdir train)
+  while IFS= read -r lane; do
+    i=$((i + 1))
+    if ! git rev-parse -q --verify "refs/heads/$lane" >/dev/null; then
+      printf '%s. %s: gone (landed or closed); neo train drop %s\n' "$i" "$lane" "$lane" > "$d/$i"; continue
+    fi
+    if ! p=$(neo_predict "$lane" "$base"); then
+      printf '%s. %s: conflicts on its predecessors'"'"' predicted merge; it gates at its land\n' "$i" "$lane" > "$d/$i"; continue
+    fi
+    set -- $p; tip="$1"
+    if $gate; then
+      ( { printf '%s. %s on %s: merge tree %s\n' "$i" "$lane" "$(git rev-parse --short "$base")" "$(git rev-parse --short "$tip^{tree}")"
+          NEO_GATE_STORE=1 neo_pregate "$base" "$tip"; } > "$d/$i" 2>&1 ) &
+      pids="$pids $!"
+    else
+      out=$(NEO_CONF_REV="$base" neo_store_green full "$(git rev-parse "$tip^{tree}")" && NEO_CONF_REV="$base" neo_store_green fast "$(git rev-parse "$tip^{tree}")" && echo pre-gated || echo "not gated")
+      printf '%s. %s on %s: merge tree %s, %s\n' "$i" "$lane" "$(git rev-parse --short "$base")" "$(git rev-parse --short "$tip^{tree}")" "$out" > "$d/$i"
+    fi
+    base="$2"
+  done <<<"$(neo_train_lanes)"
+  for p in $pids; do wait "$p" || rc=1; done
+  for p in $(seq 1 "$i"); do cat "$d/$p"; done
+  rm -rf "$d"
+  [ "$rc" = 0 ] || neo_die "a gate fails on a predicted merge tree (above); that lane's land would refuse"
 }
 
 # _forge_repo: OWNER/REPO of origin (or conf forge_repo, for a mirror).
@@ -1198,8 +1368,9 @@ $(sed 's/^/  /' <<<"$pend")
 # lacks (lanes landed or closed offline); an anchor is only ever created there.
 _anchors_publish() {
   local have r want=""
-  have=$(git ls-remote origin 'refs/safety/*' 2>/dev/null | cut -f2) || return 0
-  for r in $(git for-each-ref --format='%(refname)' refs/safety); do
+  neo_refs_migrate
+  have=$(git ls-remote origin 'refs/heads/safety/*' 'refs/heads/vault/*' 2>/dev/null | cut -f2) || return 0
+  for r in $(git for-each-ref --format='%(refname)' refs/heads/safety refs/heads/vault); do
     grep -Fx -- "$r" <<<"$have" >/dev/null || want="$want $r:$r"
   done
   [ -z "$want" ] && return 0
@@ -1301,7 +1472,7 @@ _rl_run() {
       sed -i.bak 1d "$dir/commits"; rm -f "$dir/commits.bak"
     done
     here=$(neo_tmpdir relanding); body="$here/body"
-    git log -1 --format=%B "$m" | sed 1d | grep -vE '^(Lane-Base|Requirement|Gates|Tested-Tree|Lane-Number|Ticket|Proof): ' | sed '/./,$!d' > "$body"
+    git log -1 --format=%B "$m" | sed 1d | grep -vE '^(Lane-Base|Requirement|Gates|Tested-Tree|Lane-Number|Ticket|Proof|Docs|Untested): ' | sed '/./,$!d' > "$body"
     if ! out=$(NEO_RELAND_STEP=1 "$NEO_SELF/neo" land -F "$body" 2>&1); then
       rm -rf "$here"; sed 's/^/  | /' <<<"$out" >&2
       grep -q 'already landed' <<<"$out" && neo_die "$kind/$slug was landed on origin by another clone; on lane/$kind/$ln run 'neo lane --rename <new-slug>', then 'neo sync --dev --continue'"
@@ -1572,7 +1743,7 @@ cmd_status() {
     for l in $(git for-each-ref --format='%(refname:short)' refs/heads/lane); do
       printf '%s{"name": "%s", "ahead": %s, "behind": %s}' "$sep" "$l" "$(git rev-list --count "dev..$l")" "$(git rev-list --count "$l..dev")"; sep=", "
     done
-    printf '], "attic": %s, "reland_pending": %s}\n' "$(git for-each-ref --format=x refs/heads/attic | wc -l | tr -d ' ')" "$([ -d "$(_rl_dir)" ] && echo true || echo false)"
+    printf '], "attic": %s, "landed_live": %s, "reland_pending": %s}\n' "$(git for-each-ref --format=x refs/heads/attic | wc -l | tr -d ' ')" "$(_landed_live | sed '/^$/d' | wc -l | tr -d ' ')" "$([ -d "$(_rl_dir)" ] && echo true || echo false)"
     return 0
   fi
   b=$(neo_branch)
@@ -1590,6 +1761,8 @@ cmd_status() {
     neo_info "  $l  $ahead commit(s), $behind behind dev$([ "$l" = "$b" ] && echo '  <- here')"
   done
   neo_info "attic: $(git for-each-ref --format=x refs/heads/attic | wc -l | tr -d ' ') lane(s)"
+  local ll; ll=$(_landed_live)
+  [ -z "$ll" ] || neo_info "landed, still on origin (an admin retires them with neo lane --retire): $(tr '\n' ' ' <<<"$ll")"
 }
 
 # ---------------------------------------------------------------- doctor
@@ -1610,6 +1783,7 @@ cmd_doctor() {
   fi
   if [ "${1:-}" = "--history-only" ]; then
     out=$(NEO_CONF_REV="" neo_history_check dev main)
+    neo_exceptions dev | sed 's/^/doctor: exceptions: /'
     if [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/doctor: /'; return 1; fi
     neo_info "doctor: ok (history I1-I9 hold)"; return 0
   fi
@@ -1639,7 +1813,14 @@ cmd_doctor() {
     out=$(_incoming_problems dev refs/remotes/origin/dev)
     if [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/doctor: /'; bad=1; fi
   fi
+  # landed lanes an admin has not retired yet: reported, not a failure
+  local ll; ll=$(_landed_live)
+  [ -z "$ll" ] || neo_info "doctor: landed lane(s) still on origin, for an admin to retire (neo lane --retire): $(tr '\n' ' ' <<<"$ll")"
+  # anchors and vault refs written before they were branches get their branch here
+  neo_refs_migrate
   if $history; then
+    # what the rules let land as an exception, by kind, from one command (information, not a failure)
+    neo_exceptions dev | sed 's/^/doctor: exceptions: /'
     out=$(NEO_CONF_REV="" neo_history_check dev main)
     if [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/doctor: /'; bad=1; fi
   fi
@@ -1658,7 +1839,7 @@ _need_setup() {
   git rev-parse -q --verify refs/heads/dev >/dev/null || { echo "this clone has no dev branch"; return 0; }
 }
 
-case "${2:-}" in -h|--help) case "${1:-}" in setup|lane|check|land|sync|release|bisect|status|doctor) usage_verb "$1" ;; esac ;; esac
+case "${2:-}" in -h|--help) case "${1:-}" in setup|lane|check|land|sync|release|bisect|status|doctor|train) usage_verb "$1" ;; esac ;; esac
 case "${1:-}" in
   lane|land|sync|release)
     if git rev-parse --git-dir >/dev/null 2>&1; then
@@ -1676,6 +1857,7 @@ case "${1:-}" in
   bisect) shift; cmd_bisect "$@" ;;
   status) shift; cmd_status "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
+  train) shift; cmd_train "$@" ;;
   -h|--help) usage 0 ;;
   *) usage 2 ;;
 esac

@@ -44,7 +44,8 @@ Rules.
      out), no bare --force or +refspec push, no remote repo deletion, no filter-branch -- --all,
      no git -c alias.<name>=!<shell>. main is production and only the owner promotes dev to
      it: an agent never runs `neo release` (its --dry-run is allowed), however it is invoked
-     (neo, .neo/neo, a path to it, or a shell given it as its script).
+     (neo, .neo/neo, a path to it, or a shell given it as its script), and never creates, writes
+     or pushes a release/<version> tag (git tag, update-ref, push).
   4. No printing of credentials into the transcript: credential files (.env, .netrc, keys, the gh
      token store, cloud and kube configs, /proc/*/environ), gh auth token, keychain passwords,
      git credential fill, git config listings, printenv or echo of a token-named variable, and
@@ -93,8 +94,10 @@ Rules.
      allow|ask overrides. An allow outside bypassPermissions mode rewrites only a line of plain git,
      neo, cd, export and true commands with no command substitution (Codex skips its own approval on
      allow); otherwise the deny with the prefix stands.
-  9. Safety anchors stay forever: refs/safety/<kind>/<name> (a lane's fork point, written by neo lane) is
-     never deleted, moved or hand-written, with or without a preflight: update-ref on it, a push that
+  9. Safety anchors stay forever: the branch safety/<kind>/<name> (a lane's fork point, written by neo lane;
+     earlier refs/safety/...) and vault/<kind>/<name> (its tip as it landed, written by neo land; earlier
+     refs/vault/...) are never deleted, moved or
+     hand-written, with or without a preflight: update-ref on it, a push that
      deletes it, forces it or sends anything but the anchor itself to it, and a fetch that prunes or
      forces into it are denied in a real repository.
   10. Developers never delete branches: git branch -d/-D/-m/-M, update-ref -d and a deleting push of
@@ -1248,6 +1251,11 @@ RELEASE_MSG = ("neo release blocked (neo guard): main is production and promotio
                "Offending: %s")
 
 
+RELEASE_TAG_MSG = ("release tag blocked (neo guard): main is production and a release/<version> tag is the owner's "
+                   "release, made only by the owner's neo release; an agent never creates, writes or pushes one. "
+                   "Report that dev is ready (neo release --dry-run). Offending: %s")
+
+
 def _neo_release(args):
     """True when neo's arguments are a real release: the verb release without --dry-run."""
     texts = [w.text for w in args]
@@ -1543,6 +1551,13 @@ def check_git(args, env, envprefix, ctx, words):
     if not temp_repo:
         check_anchor(sub, sargs, raw)
         check_branch_delete(sub, sargs, raw)
+    # a release/<v> tag is the owner's release (it opens the next series even without main): an agent
+    # never makes, writes or pushes one, in any repository
+    if (sub == "tag" and not any(a in ("-d", "--delete", "-l", "--list", "-v", "--verify") for a in _opts(sargs))
+            and any(re.fullmatch(r"(refs/tags/)?release/.+", a) for a in sargs)) or \
+            (sub == "update-ref" and any(a.startswith("refs/tags/release/") for a in sargs)) or \
+            (sub == "push" and any(re.search(r"(^|:|\+|refs/tags/)release/", a) for a in sargs)):
+        deny(RELEASE_TAG_MSG % raw)
     if sub == "interpret-trailers" and re.search(r"co-authored-by:?\s*.*claude", re.sub(r"['\"]", "", " ".join(sargs)), re.I):
         deny("Co-Authored-By: Claude trailer blocked (neo protocol, githooks/commit-msg). Offending: %s" % raw)
 
@@ -1722,14 +1737,21 @@ ANCHOR_RE = re.compile(r"^(\+)?([^:]*):?(.*)$")
 
 
 def check_anchor(sub, sargs, raw):
-    """refs/safety/* (a lane's fork point) is written by neo only and never deleted or moved."""
-    why = ("Safety anchors stay forever (neo rule): refs/safety/<kind>/<name> keeps a lane's fork point for the life "
-           "of the repository; neo lane writes it and nothing deletes, moves or hand-writes it, with or without a "
+    """refs/safety/* (a lane's fork point) and refs/vault/* (its landed tip) are written by neo only, never deleted or moved."""
+    why = ("Safety anchors stay forever (neo rule): the branch safety/<kind>/<name> keeps a lane's fork point for the "
+           "life of the repository, and vault/<kind>/<name> its landed tip; neo writes them and nothing deletes, "
+           "moves or hand-writes them, with or without a "
            "preflight. To park a lane use neo lane --close <reason>. Offending: %s" % raw)
-    touches = [a for a in sargs if "refs/safety" in a or a.startswith("safety/")]
+    touches = [a for a in sargs if "safety/" in a or "refs/safety" in a or "vault/" in a or "refs/vault" in a]
     if not touches:
         return
     if sub in ("update-ref", "symbolic-ref", "pack-refs", "replace"):
+        deny(why)
+    # git branch may list or inspect them, never create, move, rename or delete one by hand
+    if sub == "branch" and not any(a in ("--list", "-l", "-a", "--all", "-r", "--remotes", "--contains", "--no-contains",
+                                         "--merged", "--no-merged", "--points-at", "-v", "-vv", "--verbose", "--format",
+                                         "--show-current") or a.startswith("--format=") or a.startswith("--sort")
+                                   for a in sargs):
         deny(why)
     if sub == "push":
         opts = [a for a in sargs if a.startswith("-")]
@@ -1739,15 +1761,16 @@ def check_anchor(sub, sargs, raw):
         for r in [a for a in sargs if not a.startswith("-")]:
             m = ANCHOR_RE.match(r)
             src, dst = m.group(2), (m.group(3) or m.group(2))
-            if "refs/safety" in dst and (m.group(1) or src == "" or "refs/safety" not in src or src != dst):
+            kept = any(k in dst for k in ("refs/safety", "refs/vault", "safety/", "vault/"))
+            if kept and (m.group(1) or src == "" or src != dst):
                 deny(why)
     if sub == "fetch":
         if any(a in ("-p", "--prune", "-f", "--force", "--prune-tags") for a in sargs) or \
-                any(a.startswith("+") and "refs/safety" in a.split(":", 1)[-1] for a in sargs):
+                any(a.startswith("+") and any(k in a.split(":", 1)[-1] for k in ("safety/", "vault/")) for a in sargs):
             deny(why)
 
 
-KEPT_BRANCH_RE = re.compile(r"^(refs/heads/|heads/)?(dev|main|lane/.+|attic/.+)$")
+KEPT_BRANCH_RE = re.compile(r"^(refs/heads/|heads/)?(dev|main|lane/.+|attic/.+|safety/.+|vault/.+)$")
 
 
 def check_branch_delete(sub, sargs, raw):

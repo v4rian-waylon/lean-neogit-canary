@@ -185,6 +185,30 @@ neo_history_check() {
   return 0
 }
 
+# neo_exceptions [DEV]: one line per kind of exception the rules let land,
+# "<kind>: <n> merge(s): <versions>", for merges carrying Bulk:, Untested:,
+# Gate-Change: or Docs: none, and for merges whose Gates: ran no gate. The
+# history audit prints it so every exception is visible from one command.
+neo_exceptions() {
+  local dev="${1:-dev}" root m v tr g kind out
+  root=$(git rev-list --first-parent --max-parents=0 "$dev" | tail -n 1)
+  out=$(for m in $(git rev-list --first-parent --reverse "$dev"); do
+    [ "$m" = "$root" ] && continue
+    v=$(neo_version_of "$m"); [ -n "$v" ] || v=$(git rev-parse --short "$m")
+    tr=$(git log -1 --format=%B "$m" | git interpret-trailers --parse)
+    grep -E '^Bulk: ' <<<"$tr" >/dev/null && echo "bulk $v"
+    grep -E '^Untested: ' <<<"$tr" >/dev/null && echo "untested $v"
+    grep -E '^Gate-Change: ' <<<"$tr" >/dev/null && echo "gate-change $v"
+    grep -E '^Docs: none' <<<"$tr" >/dev/null && echo "docs-none $v"
+    g=$(sed -nE 's/^Gates: (.*)$/\1/p' <<<"$tr" | sed -n 1p)
+    [[ "$g" == *=pass* ]] || echo "no-gate $v"
+  done)
+  for kind in bulk untested gate-change docs-none no-gate; do
+    v=$(awk -v k="$kind" '$1 == k { printf " %s", $2 }' <<<"$out")
+    [ -z "$v" ] || printf '%s: %s merge(s):%s\n' "$kind" "$(wc -w <<<"$v" | tr -d ' ')" "$v"
+  done
+}
+
 # neo_slug_landed SLUG [DEV]: 0 when DEV's first-parent line holds a merge of SLUG.
 neo_slug_landed() {
   git log --first-parent --format=%s "${2:-dev}" 2>/dev/null | grep -E "^\[MERGE\] [a-z]+/$1 into dev: " >/dev/null
@@ -241,8 +265,25 @@ neo_ungated_range() {
   printf '%s' "${out# }"
 }
 
+# neo_prove_release C: re-run the release gate the conf at C names on C's own
+# tree and compare with the release/<v> tag's Gates: receipt; prints
+# "P1 <c> <why>" when a release that claims a pass cannot show one.
+neo_prove_release() {
+  local c="$1" v receipt wt r
+  v=$(neo_version_of "$c"); [ -n "$v" ] || return 0
+  git rev-parse -q --verify "refs/tags/release/$v" >/dev/null || return 0
+  receipt=$(git cat-file -p "refs/tags/release/$v" | sed -nE 's/^Gates: (.*)$/\1/p' | sed -n 1p)
+  wt=$(mktemp -d "${TMPDIR:-/tmp}/neo-prove.XXXXXX")
+  git worktree add -q --detach "$wt" "$c" >/dev/null 2>&1 || { echo "P1 $c cannot check out the tree of release/$v"; return 0; }
+  r=$(NEO_CONF_REV="$c" neo_gate release "$wt" 2>/dev/null) || true
+  git worktree remove --force "$wt" >/dev/null 2>&1 || true
+  [ "$r" != fail ] || echo "P1 $c release gate fails on the tree of release/$v (its tag says ${receipt:-nothing})"
+  return 0
+}
+
 # neo_prove_range SINCE DEV: neo_prove_merge on each first-parent merge of DEV
-# after SINCE (SINCE empty or all zeros: every merge after the root).
+# after SINCE (SINCE empty or all zeros: every merge after the root), and
+# neo_prove_release on each of them that a release/<v> tag names.
 neo_prove_range() {
   local since="$1" dev="${2:-dev}" root m range
   root=$(git rev-list --first-parent --max-parents=0 "$dev" | tail -n 1)
@@ -250,6 +291,7 @@ neo_prove_range() {
   for m in $(git rev-list --first-parent --reverse $range); do
     [ "$m" = "$root" ] && continue
     neo_prove_merge "$m"
+    neo_prove_release "$m"
   done
 }
 
