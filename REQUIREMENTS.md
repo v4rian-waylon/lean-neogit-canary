@@ -17,6 +17,7 @@
 | REQ-R-forge-261112104430 | The canary keeps the rulesets and the neo-check workflow of run 261112104430 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112104430` |
 | REQ-R-forge-261112112049 | The canary keeps the rulesets and the neo-check workflow of run 261112112049 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112112049` |
 | REQ-R-forge-261112112547 | The canary keeps the rulesets and the neo-check workflow of run 261112112547 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112112547` |
+| REQ-R-forge-261112154555 | The canary keeps the rulesets and the neo-check workflow of run 261112154555 on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/forge-261112154555` |
 | REQ-R-gadget-261112112547 | A gadget lane of run 261112112547 lands through its pull request. | P1 | ✅ done | ⚠️ needs units | internal | `feature/gadget-261112112547` |
 | REQ-R-review-261112104037 | Lands of run 261112104037 go through review on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/review-261112104037` |
 | REQ-R-review-261112104430 | Lands of run 261112104430 go through review on the forge. | P2 | ✅ done | ⚠️ needs units | internal | `chore/review-261112104430` |
