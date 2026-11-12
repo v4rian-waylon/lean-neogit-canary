@@ -36,6 +36,7 @@
 | REQ-R-widget-261112104430 | A widget lane of run 261112104430 runs the forge jobs green. | P1 | ✅ done | ⚠️ needs units | internal | `feature/widget-261112104430` |
 | REQ-R-widget-261112112049 | A widget lane of run 261112112049 runs the forge jobs green. | P1 | ✅ done | ⚠️ needs units | internal | `feature/widget-261112112049` |
 | REQ-R-widget-261112112547 | A widget lane of run 261112112547 runs the forge jobs green. | P1 | ✅ done | ⚠️ needs units | internal | `feature/widget-261112112547` |
+| REQ-R-widget-261112154555 | A widget lane of run 261112154555 runs the forge jobs green. | P1 | ✅ done | ⚠️ needs units | internal | `feature/widget-261112154555` |
 
 ## Units of Intent
 <!-- NOT binding, NOT protected. Promotes to a Hard Requirement through a lane whose file says Promotes: <slug>. -->
