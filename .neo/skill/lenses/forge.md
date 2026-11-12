@@ -17,8 +17,9 @@
   read, never assumed. Never use the forge's merge button.
 
 - In the framework source, forge behaviour is proven live by
-  `tests/canary/live.sh` (DESIGN.md, Live canary); it needs `delete_repo`,
-  which the owner grants, and it deletes only what its ledger created.
+  `tests/canary/live.sh` in one persistent canary repository (DESIGN.md,
+  Live canary); it needs `repo` and `workflow`, never `delete_repo`, and
+  removes only its run's unlanded lanes.
 
 ## Tokens
 - gh holds the credential: use `gh api` and `gh auth status`; never extract

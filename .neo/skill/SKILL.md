@@ -45,9 +45,10 @@ transport, never publishing. Never run `neo release`: when dev is ready, run
    (never a hand `neo land` while a re-land is pending).
 7. To find a regression: `neo bisect <good> <bad> -- <test>`. To undo a lane:
    a revert lane with `Fixes: <merge>` (FLOWS.md).
-8. Never delete or move a lane, the attic or a safety anchor
+8. Never delete or move a lane, the attic, dev, main or a safety anchor
    (`refs/safety/...`, a lane's fork point, kept forever); park a lane
-   with `neo lane --close "<reason>"`.
+   with `neo lane --close "<reason>"`. Never stage a secret, key, build
+   output, `node_modules/`, `.env`, `*.zip` or `*.bak`.
 9. Every refusal names the fix. Run it; never work around a refusal with
    `--no-verify`, a hand-made merge, a moved tag or a hand-written proof note.
 

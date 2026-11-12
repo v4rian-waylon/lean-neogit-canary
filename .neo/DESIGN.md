@@ -114,6 +114,18 @@ count and name in these docs equal to the code.
   stays the requirement file's name and the merge subject's, so I7 and I8
   read as before. A merge is judged by the rule its first parent's
   framework knew, so history landed before numbers stays lawful.
+- Banned files and kept branches hold for humans too (neo-git's
+  "developers never delete branches" ruleset and its banned list, which lean
+  had left to the agent guard). `pre-commit` refuses a staged banned file
+  on every branch, and land and a lane push refuse a lane commit that adds
+  one past the hook, so a `--no-verify` commit still never reaches dev or
+  a shared remote. pre-push refuses a hand deletion of a lane on the remote
+  and lets through only neo's own moves, recognised in the same push (dev's
+  new tip holds the lane, or the attic takes its tip); the agent guard
+  denies deleting or renaming dev, main, a lane or the attic outright. No
+  forge ruleset can say "no deletion except a land", so lanes carry none on
+  the forge; landed work survives anyway as the merge's second parent and
+  every fork point as its anchor.
 - A slug that lands elsewhere first is refused at sync (I7). `neo lane
   --rename` rewrites the lane so its requirement file always carried the
   new slug, never deleting the file the other lane landed.
@@ -288,7 +300,7 @@ and gated by the scenarios present at that point.
 | Sixteen agent skills (lenses), user overrides and a lazy loader | one skill, `skill/SKILL.md`, whose task table loads one lens file from `skill/lenses/` per task | Every rule of every neo-git lens has a home, listed rule by rule in `skill/lenses/RULE-MAP.md`: the skill, a lens file section, or the code that enforces it; the docs lint proves the loader and the map resolve. About a fifth of neo-git's bytes; user overrides stay cut (one skill to override) |
 | Doc-freshness gate and protocol lint over skills and docs | `.neo/lint/docs.sh` in every gate | Verbs and flags, invariant ids, conf keys, kinds and tags, scenario ids and counts in the docs are read from the code and must match it |
 | CHANGELOG file, `changelog` and `release-of` tools | none; history answers both | A changelog is `git log --first-parent --format='%s%n%n%b' vA..vB` on dev (each merge's body is its entry); a commit's release is `git tag --contains <sha> --sort=v:refname 'release/*'`, first line. A file would be a second database (principle 2) |
-| Live canaries on public throwaway repositories | `tests/canary/live.sh`, run by hand | Forge behaviour is driven through a `gh` stub on every land (S20, S28, S40) and the workflow's own step scripts are executed locally (S40); the live canary proves it on GitHub itself: one public throwaway repository per run, the rulesets refusing a forced dev, a deleted dev, a moved tag and a deleted attic branch past the hooks, the workflow's jobs green, a release, a land through review and a release under `land_pr=required` (hole M1); it deletes only what its ledger says it created (S87 proves that safety against a stub) |
+| Live canaries on public throwaway repositories | `tests/canary/live.sh` in one persistent public canary repository, run by hand | Forge behaviour is driven through a `gh` stub on every land (S20, S28, S40) and the workflow's own step scripts are executed locally (S40); the live canary proves it on GitHub itself (Live canary, below): rulesets refusing a forced dev, a deleted dev, a moved tag and a deleted attic branch past the hooks, the workflow's jobs, a release, review under `land_pr=required`; it never deletes a repository (S87 proves its safety against a stub) |
 | Reconstruct, shuttle, snapshot and rewrite tooling | out of the core | Not needed by the flow; history quality is enforced at land, not repaired afterwards; the rebuild rules live in the skill's `rebuild.md` lens |
 | Bench harness, agent runner and loadbytes | `bench/speed.sh` and `bench/loadbytes.py`, framework-only | Lean's speed and read budget are measured against neo-git, not claimed (Measured, above); the model-run agent bench stays out: no model is called |
 
@@ -333,22 +345,34 @@ blocks a land; `--strict` makes it fail for teams that want it as a gate.
 
 `tests/canary/live.sh` restores neo-git's live canaries and public
 throwaways (n207, n209) in lean's shape: one script, no CI minutes, run by
-hand. It creates one public repository named
-`neo-canary-<UTC stamp>-<random>`, vendors this `.neo`, runs the real flows
-against GitHub and checks C1 to C8 (setup and rulesets; dev, tags and the
-attic refused past the hooks; the neo-check, commit-audit and neo-linux jobs
-green on a lane; the owner's release; `land --pr` through review and a
-release under `land_pr=required`, the audit's hole M1), then deletes the
-repository. Safety comes before speed: it probes the gh scopes once and
-creates nothing without `delete_repo`, writes the name to its ledger
-(`NEO_CANARY_LEDGER`, default `~/.neo/canary-ledger`) before creating it,
-and deletes only canary-named repositories the ledger says it created, by
-exact name, recording each deletion once GitHub answers 404; `--cleanup`
-finishes an interrupted run the same way. First live run, 2026-11-12: it
-stopped before creating anything, because the gh credential on the run host
-lacks the `delete_repo` scope (`gh auth refresh -h github.com -s
-delete_repo` is the owner's step); hole M1 stays unverified live until it
-runs.
+hand, and no repository is ever deleted. It works in one persistent public
+repository (`<gh user>/lean-neogit-canary`, created once when missing): every
+run lands run-scoped lanes (slugs ending in the run id) onto that
+repository's own dev, so its dev, main, version and release tags and
+rulesets keep each run's record, as neo's rules require; the framework under
+test arrives through an upgrade lane when it differs. The checks: C1 setup
+or upgrade and the four rulesets; C2 dev refused a force push and a deletion
+past the hooks; C3 a version tag refused a move and a deletion; C4 an attic
+branch refused a deletion; C5 the neo-check, commit-audit and neo-linux jobs
+green on a pushed lane; C6 the owner's release; C7 `land --pr` through
+review and C8 a release under `land_pr=required` (hole M1); C0 and C9 put the
+canary back to optional review, lifting the review rule as the owner's admin
+step first. Cleanup removes only the run's unlanded lanes by name; tags, the
+attic, dev and main stay by rule. It needs gh's `repo` and `workflow` scopes,
+never `delete_repo` (S87 proves the safety against a stub).
+
+Live runs, 2026-11-12 (receipts in the restoration progress record): run
+261112104430 passed C0 to C6 and C9 and failed C7 and C8. C4 failed in the
+run before it: GitHub matches ruleset patterns with fnmatch, so
+`refs/heads/attic/**` protected one level only and a parked lane was
+deleted; the ruleset now includes `refs/heads/attic/**/*` and C4 passes. C7
+and C8 are open defects of the forge flow: with `land_pr=required`, dev's
+ruleset carries GitHub's pull_request rule, and GitHub refuses the push that
+`neo land --pr` makes to move dev to the approved merge ("atomic transaction
+failed" on the lane, the tag refused) and the push of main by `neo release`
+("push declined due to repository rule violations"), since neo-protected
+also covers main. Hole M1 is confirmed live; how review should move dev and
+main on GitHub is the owner's decision.
 
 ## Measured: speed and read budget
 

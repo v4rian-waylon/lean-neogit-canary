@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# pre-commit - the earliest catch, before a lane commit exists. On a lane
+# pre-commit - the earliest catch, before a lane commit exists. On every
+# branch, for humans as for agents: no banned file (secrets, keys, builds,
+# .env, archives; neo_banned in lib/core.sh) is added by the staged set. On a lane
 # branch: a lane's first commit never carries the placeholder requirement,
 # REQUIREMENTS.md is regenerated from the staged requirement files and staged
 # with them (lib/reqs.sh), and when dev's conf sets gates_commit, the staged
@@ -9,6 +11,12 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for l in core message version policy identity reqs; do . "$here/lib/$l.sh"; done
 fail() { echo "X pre-commit: $*" >&2; exit 1; }
+# the staged set adds no banned file (deleting one, to undo a leak, is fine)
+bad=""
+while IFS= read -r -d '' p; do
+  if [ -n "$(neo_banned "$p")" ]; then bad="$bad $p"; fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+[ -z "$bad" ] || fail "banned file(s) staged:$bad. Secrets, keys, certificates, build output, node_modules, .env, *.zip and *.bak never enter history; unstage them (git restore --staged <path>) and keep them out (.gitignore)"
 b=$(neo_branch)
 case "$b" in lane/*) ;; *) exit 0 ;; esac
 ks=$(neo_lane_parse "$b") || exit 0

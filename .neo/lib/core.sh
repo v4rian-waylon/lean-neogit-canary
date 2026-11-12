@@ -166,3 +166,20 @@ neo_anchor_refs() {
   if [ -n "$n" ] && git rev-parse -q --verify "refs/safety/numbers/$n" >/dev/null; then printf 'refs/safety/numbers/%s\n' "$n"; fi
   return 0
 }
+
+# Banned files (neo-git's list): secrets, keys, certificates, build output,
+# dependency trees, archives and backups never enter history. The
+# pre-commit hook refuses them in the staged set (for humans as for agents,
+# whose guard already denies staging them), and land refuses a lane that
+# adds one past the hook. Removing such a file is always allowed.
+NEO_BANNED_RE='(^|/)\.DS_Store$|(^|/)\.auth/|(^|/)keys/|\.(p8|p12|cer|pem|provisionprofile|mobileprovision)$|(^|/)build(-[^/]*)?/|(^|/)node_modules/|(^|/)\.env$|(^|/)\.env\.([^/]*)$|\.zip$|\.bak$'
+# neo_banned PATH...: prints each PATH the banned list names (an .env.example,
+# .sample, .template or .dist file is a template, not a secret).
+neo_banned() {
+  local p
+  for p in "$@"; do
+    [[ "$p" =~ $NEO_BANNED_RE ]] || continue
+    [[ "$p" =~ (^|/)\.env\.(example|sample|template|dist)$ ]] && continue
+    printf '%s\n' "$p"
+  done
+}

@@ -12,7 +12,9 @@
 #   - version and release tags are created once, never moved or deleted,
 #     and a version tag sits on the merge whose subject names it
 #   - lane commits carry ruled messages, known authors and known committers
-#     (dev's identity map); an attic branch is never deleted
+#     (dev's identity map) and add no banned file; an attic branch is never
+#     deleted, and a lane is deleted only as neo moves it in the same push
+#     (land: dev's new tip holds it; close: attic/<same name> at its tip)
 #   - a lane push holds at most max_commits commits and every one of them
 #     passes the fast gate or is a valid Red: commit (neo_check_each), so a
 #     red commit never reaches a shared remote unnamed
@@ -96,6 +98,21 @@ while read -r lref lsha rref rsha; do
       neo_lane_parse "$rref" >/dev/null || fail "${rref#refs/heads/} is not lane/<kind>/<slug> or attic/<kind>/<slug>"
       if [ "$lsha" = "$zero" ]; then
         case "$rref" in refs/heads/attic/*) fail "${rref#refs/heads/} is never deleted (the attic keeps parked work; neo lane --restore works on a local copy)" ;; esac
+        # developers never delete a lane: it leaves only as neo moves it, in
+        # the same push, onto dev (land: dev's new tip holds the lane) or into
+        # the attic (close: attic/<same name> at the lane's tip), or once the
+        # remote's dev already holds it (a merge through the PR)
+        moved=0
+        while read -r _l s2 r2 _r; do
+          case "$r2" in
+            refs/heads/dev) [ "$s2" != "$zero" ] && git merge-base --is-ancestor "$rsha" "$s2" 2>/dev/null && moved=1 ;;
+            "refs/heads/attic/${rref#refs/heads/lane/}") [ "$s2" = "$rsha" ] && moved=1 ;;
+          esac
+        done <<<"$lines"
+        # or it already landed there: GitHub merged it through its PR (land --pr under land_pr=required)
+        if [ "$moved" = 0 ] && git rev-parse -q --verify "refs/remotes/$remote/dev" >/dev/null \
+           && git merge-base --is-ancestor "$rsha" "refs/remotes/$remote/dev" 2>/dev/null; then moved=1; fi
+        [ "$moved" = 1 ] || fail "${rref#refs/heads/} is never deleted by hand (developers never delete a lane); park it with neo lane --close <reason>, or land it"
         continue
       fi
       # land --pr publishes the merge itself as the lane's head for review
@@ -152,6 +169,8 @@ while read -r lref lsha rref rsha; do
         [ -z "$a" ] || fail "commit $(git rev-parse --short "$c"): $a"
         a=$(NEO_CONF_REV=$(git rev-parse -q --verify refs/heads/dev || true) neo_commit_smells "$c")
         [ -z "$a" ] || fail "commit $(git rev-parse --short "$c") fails the commit audit: $(tr '\n' ';' <<<"$a")"
+        bf=$(git diff-tree -r --root --no-commit-id --name-only --diff-filter=ACMR "$c" | while IFS= read -r f; do neo_banned "$f"; done)
+        [ -z "$bf" ] || fail "commit $(git rev-parse --short "$c") adds banned file(s): $(tr '\n' ' ' <<<"$bf")(secrets, keys, builds, .env, archives never enter history)"
       done
       unset NEO_RULES_AT ;;
     refs/heads/*) fail "branch ${rref#refs/heads/} is not dev, main, lane/<kind>/<slug> or attic/<kind>/<slug>" ;;

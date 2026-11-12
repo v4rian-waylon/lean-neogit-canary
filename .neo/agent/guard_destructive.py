@@ -97,6 +97,9 @@ Rules.
      never deleted, moved or hand-written, with or without a preflight: update-ref on it, a push that
      deletes it, forces it or sends anything but the anchor itself to it, and a fetch that prunes or
      forces into it are denied in a real repository.
+  10. Developers never delete branches: git branch -d/-D/-m/-M, update-ref -d and a deleting push of
+     dev, main, a lane or an attic branch are denied in a real repository, preflight or not (neo lane
+     --close parks a lane, neo lane --rename renames one, neo land retires a landed one).
   Also preflighted as rewrites: reset (any mode) to a commit HEAD does not lead to, amend of a
   pushed commit, checkout of a magic pathspec (:/), interactive clean.
 Limits. This is a guard against accidents and casual misuse by an agent, not a sandbox and not
@@ -1539,6 +1542,7 @@ def check_git(args, env, envprefix, ctx, words):
     # safety anchors stay forever (owner rule): never deleted, moved or forged, preflight or not
     if not temp_repo:
         check_anchor(sub, sargs, raw)
+        check_branch_delete(sub, sargs, raw)
     if sub == "interpret-trailers" and re.search(r"co-authored-by:?\s*.*claude", re.sub(r"['\"]", "", " ".join(sargs)), re.I):
         deny("Co-Authored-By: Claude trailer blocked (neo protocol, githooks/commit-msg). Offending: %s" % raw)
 
@@ -1741,6 +1745,31 @@ def check_anchor(sub, sargs, raw):
         if any(a in ("-p", "--prune", "-f", "--force", "--prune-tags") for a in sargs) or \
                 any(a.startswith("+") and "refs/safety" in a.split(":", 1)[-1] for a in sargs):
             deny(why)
+
+
+KEPT_BRANCH_RE = re.compile(r"^(refs/heads/|heads/)?(dev|main|lane/.+|attic/.+)$")
+
+
+def check_branch_delete(sub, sargs, raw):
+    """Developers never delete branches: dev, main, a lane or the attic is never deleted or renamed by hand."""
+    why = ("Developers never delete branches (neo rule): dev, main, lanes and the attic are never deleted or renamed "
+           "by hand, with or without a preflight. Park a lane with neo lane --close <reason>, rename one with neo "
+           "lane --rename <slug>, and let neo land retire a landed one. Offending: %s" % raw)
+    pos = [a for a in sargs if not a.startswith("-")]
+    opts = [a for a in sargs if a.startswith("-")]
+    if sub == "branch" and any(o in ("-d", "-D", "--delete", "-m", "-M", "--move") for o in opts):
+        if any(KEPT_BRANCH_RE.match(p) for p in pos):
+            deny(why)
+    if sub == "update-ref" and "-d" in opts and any(KEPT_BRANCH_RE.match(p) and p.startswith("refs/heads/") for p in pos):
+        deny(why)
+    if sub == "push":
+        delete = any(o in ("-d", "--delete") for o in opts)
+        for r in pos[1:]:
+            r = r.lstrip("+")
+            if r.startswith(":") and KEPT_BRANCH_RE.match(r[1:]):
+                deny(why)
+            if delete and KEPT_BRANCH_RE.match(r):
+                deny(why)
 
 
 def check_push(sargs, gdir, raw):

@@ -92,11 +92,12 @@ agent follows the steps literally; every refusal names the next command.
 
 ## Prove the forge (framework source)
 
-`bash .neo/tests/canary/live.sh` (gh signed in with the `repo`, `workflow`
-and `delete_repo` scopes): one public throwaway repository runs the real
-flows on GitHub and is deleted by exact name from the canary's ledger;
-`--dry-run` shows the plan, `--cleanup` finishes an interrupted run. A
-failing check names what the forge answered.
+`bash .neo/tests/canary/live.sh` (gh signed in with the `repo` and
+`workflow` scopes): a run lands run-scoped lanes onto one persistent public
+canary repository and checks the real forge (C0 to C9); nothing is ever
+deleted but the run's own unlanded lanes. `--dry-run` shows the plan,
+`--cleanup RUN` removes an interrupted run's lanes. A failing check names
+what the forge answered.
 
 ## Review on a forge
 
@@ -148,6 +149,13 @@ atomic push. The next land opens the next series.
 
 ## Recover and tidy
 
+- A banned file was staged (`pre-commit` names it): `git restore --staged
+  <path>` and add it to `.gitignore`. One committed past the hook makes the
+  lane push and `neo land` refuse the lane: rebuild the lane's commits
+  without it (it must never reach history), then land.
+- Never delete a lane, the attic, dev, main or an anchor: park with `neo
+  lane --close`, rename with `neo lane --rename`; `neo land` retires a
+  landed lane itself.
 - Park a lane: `neo lane --close "<reason>"` (to `attic/`, reason as a git
   note); `neo lane --restore attic/<kind>/<slug>` brings it back.
 - Every lane ever started, in creation order, landed, open or abandoned:

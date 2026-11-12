@@ -821,6 +821,10 @@ cmd_land() {
         || neo_die "commit $(git rev-parse --short "$c") says Fixes: $viol, which names no commit on dev"
     fi
   done
+  # no lane commit adds a banned file, even one made past the pre-commit hook
+  local banned
+  banned=$(git log --format= --name-only --diff-filter=ACMR "dev..HEAD" | sort -u | while IFS= read -r f; do [ -z "$f" ] || neo_banned "$f"; done)
+  [ -z "$banned" ] || neo_die "the lane adds banned file(s): $(tr '\n' ' ' <<<"$banned")(secrets, keys, builds, .env, archives never enter history); drop them from the lane's commits"
   git cat-file -e "HEAD:requirements/$slug.md" 2>/dev/null || neo_die "requirements/$slug.md is not committed on the lane (I8)"
   grep -qF "$NEO_REQ_PLACEHOLDER" <<<"$(git show "HEAD:requirements/$slug.md")" \
     && neo_die "requirements/$slug.md still holds the placeholder; state the requirement this lane meets and how its tests prove it"
@@ -907,7 +911,21 @@ cmd_land() {
   if $dry; then
     neo_info "dry run: would land $lane as $next (gates fast=$g_fast full=$g_full), message:"; sed 's/^/  | /' "$msg"; rm -f "$msg"; return 0
   fi
-  if $pr; then
+  local forge_merged=0
+  if $pr && [ "$(neo_conf land_pr optional)" = required ]; then
+    # Under land_pr=required GitHub's review rule refuses any push to dev, so
+    # the merge is made through the PR: the PR head is the lane tip the gates
+    # ran on, approvals and statuses count on that sha, and GitHub's merge API
+    # writes the merge once with neo's subject and body (merge-once kept).
+    # neo then verifies the merge (parents old dev and the tested head, tree
+    # the Tested-Tree, the subject) before it tags it; a mismatch leaves the
+    # tag off and says so.
+    local head; head=$(git rev-parse HEAD)
+    pr_no=$(_land_pr_gate "$lane" "$msg" "$head" "$olane") || { local prc=$?; rm -f "$msg"; exit "$prc"; }
+    merge=$(_land_pr_merge "$pr_no" "$msg" "$head" "$dev_tip" "$tree") || { rm -f "$msg"; exit 1; }
+    olane=$(git ls-remote origin "refs/heads/$lane" 2>/dev/null | cut -f1 || true)
+    forge_merged=1
+  elif $pr; then
     # The merge commit is the PR head: reviewers approve the exact commit dev
     # will move to, and a new lane commit or a moved dev makes a new merge,
     # so earlier approvals no longer count. An unchanged lane reuses the merge.
@@ -937,8 +955,10 @@ cmd_land() {
     # the lane is deleted only where origin still holds what was landed
     if [ -n "$olane" ]; then del=":refs/heads/$lane"; lease="--force-with-lease=refs/heads/$lane:$olane"; fi
     # One atomic push: dev, the tag, the lane's anchor and number and the lane deletion land together or not at all.
+    # After a merge through the PR, origin's dev already holds the merge: the push carries the rest.
+    local devref="$merge:refs/heads/dev"; [ "$forge_merged" = 0 ] || devref=""
     # shellcheck disable=SC2086
-    if ! git push -q --atomic $lease origin "$merge:refs/heads/dev" "refs/tags/$next" $anchors $del; then
+    if ! git push -q --atomic $lease origin $devref "refs/tags/$next" $anchors $del; then
       git tag -d "$next" >/dev/null
       neo_die "push refused or the link dropped; nothing changed locally or on origin (dev, $next). Run 'neo sync' if dev moved, then land again"
     fi
@@ -982,7 +1002,7 @@ _land_pr_gate() {
   if [ "$old" != "$m" ]; then
     [ -z "$old" ] || lease="--force-with-lease=refs/heads/$lane:$old"
     # shellcheck disable=SC2086
-    git push -q $lease origin "$m:refs/heads/$lane" || neo_die "publishing the merge as $lane's head failed (origin's lane moved?)"
+    git push -q $lease origin "$m:refs/heads/$lane" || neo_die "publishing $(git rev-parse --short "$m") as $lane's head failed (origin's lane moved?)"
   fi
   bodyf=$(mktemp "${TMPDIR:-/tmp}/neo-pr.XXXXXX"); sed '1,2d' "$msg" > "$bodyf"
   n=$(gh pr list --repo "$repo" --head "$lane" --base dev --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
@@ -1000,7 +1020,7 @@ _land_pr_gate() {
   [[ "$need" =~ ^[0-9]{1,2}$ ]] || NEO_RC=2 neo_die "land_approvals='$need' must be 0 to 99"
   have=$(_pr_approvals "$repo" "$n" "$m")
   if [ "$have" -lt "$need" ]; then
-    neo_info "PR #$n carries the merge $(git rev-parse --short "$m") and has $have of $need approval(s) on it; run 'neo land --pr' again once it is approved" >&2
+    neo_info "PR #$n carries $(git rev-parse --short "$m") and has $have of $need approval(s) on it; run 'neo land --pr' again once it is approved" >&2
     return 3
   fi
   if [ "$(neo_conf land_pr optional)" = required ]; then
@@ -1017,6 +1037,27 @@ _land_pr_gate() {
   fi
   neo_info "PR #$n approved ($have of $need) on $(git rev-parse --short "$m")" >&2
   printf '%s' "$n"
+}
+
+# _land_pr_merge N MSG HEAD DEV TREE: merge PR N through GitHub's merge API
+# (merge_method=merge, sha=HEAD, neo's subject and body), fetch origin's dev
+# and print the merge once it is exactly the one neo land would write: parents
+# DEV and HEAD, tree TREE, neo's subject. Refuses, untagged, otherwise.
+_land_pr_merge() {
+  local n="$1" msg="$2" head="$3" dev="$4" tree="$5" repo sha m title
+  repo=$(_forge_repo); title=$(sed -n 1p "$msg")
+  sha=$(gh api -X PUT "repos/$repo/pulls/$n/merge" -f merge_method=merge -f sha="$head" \
+        -f commit_title="$title" -f commit_message="$(sed '1,2d' "$msg")" --jq .sha 2>"$msg.err") \
+    || { neo_warn "$(cat "$msg.err")"; rm -f "$msg.err"; neo_die "GitHub refused to merge PR #$n at $(git rev-parse --short "$head"); dev is unchanged"; }
+  rm -f "$msg.err"
+  git fetch -q origin "+refs/heads/dev:refs/remotes/origin/dev" || neo_die "PR #$n was merged on GitHub ($sha) but origin's dev cannot be fetched; run neo sync --dev, then neo doctor"
+  m=$(git rev-parse -q --verify "refs/remotes/origin/dev^{commit}")
+  [ "$m" = "$sha" ] || neo_die "origin's dev ($m) is not GitHub's merge of PR #$n ($sha); no tag was made"
+  [ "$(git rev-list --parents -n1 "$m")" = "$m $dev $head" ] \
+    || neo_die "GitHub's merge $m has parents $(git rev-list --parents -n1 "$m" | cut -d' ' -f2-), not dev $dev and the tested head $head; no tag was made"
+  [ "$(git rev-parse "$m^{tree}")" = "$tree" ] || neo_die "GitHub's merge $m tree is not the tested tree $tree; no tag was made"
+  [ "$(git log -1 --format=%s "$m")" = "$title" ] || neo_die "GitHub's merge $m subject is not '$title'; no tag was made"
+  printf '%s' "$m"
 }
 
 # _pr_approvals REPO N SHA: distinct approving reviewers of PR N whose review
