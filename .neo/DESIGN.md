@@ -4,7 +4,7 @@ lean-neogit distils neo-git into one flow: lanes in, one merge out, and the
 history as the only database. The specification is the distillation spec of
 the lean design audit (principles, invariants, verbs, scenario matrix);
 this file records the decisions taken while building it. The code now holds
-nine verbs and invariants I1 to I9, and `.neo/lint/docs.sh` keeps every
+ten verbs and invariants I1 to I9, and `.neo/lint/docs.sh` keeps every
 count and name in these docs equal to the code.
 
 ## Principles
@@ -34,6 +34,20 @@ count and name in these docs equal to the code.
 - A lane must contain dev's tip to land (no stale merges): the merge tree is
   then the lane tip's tree, and the gates run on that exact tree in a
   private worktree before the merge commit exists. `Tested-Tree` records it.
+- Gates run ahead of the land lock (the merge train, `lib/gatestore.sh`).
+  Because a lane must contain dev's tip, the merge tree is a pure function
+  of the base and the lane: `neo train` (and `neo land --predict BASE`)
+  replays `neo sync`'s own rebase, with the register regenerated after each
+  commit, onto the predicted merge of the lanes queued before it, so the
+  predicted commits and merge tree are byte for byte the ones the land will
+  write; nothing in the tree depends on the version (the version lives only
+  in the merge subject and the tag). Every pool's gates then run in
+  parallel, and each run is stored by tree and gatecfg under the git common
+  dir, shared by every work tree. The land in order finds its trees green,
+  re-verifies the tree identity, merges, tags and pushes. The store is only
+  a cache: a changed predecessor, gate command or `gate_paths` file is a
+  different key, a red record is never reused, and a miss gates as before;
+  pre-push and `neo doctor --prove` never read it.
 - A test-first commit that fails its test on purpose carries `Red: <test>`
   and cannot be a lane tip; `neo check --each` runs the fast gate on every
   lane commit and names any unmarked red commit.
@@ -88,15 +102,18 @@ count and name in these docs equal to the code.
   mid-push) undoes the local tag and leaves dev unmoved, so the next land
   resumes from the same state.
 - Safety anchors stay forever (the owner's rule, kept from neo-git). `neo
-  lane` writes `refs/safety/<kind>/<slug>` at the fork point as an annotated
-  tag object, so it records who forked and when. It rides with the lane: pre-push pushes it before a lane
+  lane` writes the branch `safety/<kind>/<slug>`, as neo-git did, on an
+  anchor commit whose only parent is the fork point, so it records who
+  forked and when and two lanes never share one. It rides with the lane: pre-push pushes it before a lane
   or attic push when the remote lacks it, land and close put it in their
   atomic push, and `neo sync --dev` publishes those of offline lands. A
   sync, a close, a rename (which adds the new name's anchor) and a land never
   touch it. pre-push and the agent guard refuse deleting, moving or forging
-  one. The namespace is outside `refs/heads` and `refs/tags`, as the owner
-  named it, so the forge rulesets cannot cover it: on a forge only a push
-  past the hooks can delete one.
+  one, and on a forge `neo-safety-lockdown` refuses it to everyone but
+  admins. Anchors first lived at `refs/safety/...` as annotated tags, where
+  no forge ruleset reaches; the owner settled on neo-git's branch namespace,
+  and every clone migrates an old anchor to the same branch commit (the
+  tag's tagger and date become the commit's), keeping the old ref.
 - Lane numbers are back from neo-git (the owner refused their removal), in
   lean's shape: `neo lane` takes the number itself, no allocator workflow and
   no extra command. neo-git's allocator could not serialize two clones
@@ -122,10 +139,24 @@ count and name in these docs equal to the code.
   a shared remote. pre-push refuses a hand deletion of a lane on the remote
   and lets through only neo's own moves, recognised in the same push (dev's
   new tip holds the lane, or the attic takes its tip); the agent guard
-  denies deleting or renaming dev, main, a lane or the attic outright. No
-  forge ruleset can say "no deletion except a land", so lanes carry none on
-  the forge; landed work survives anyway as the merge's second parent and
-  every fork point as its anchor.
+  denies deleting or renaming dev, main, a lane or the attic outright. On
+  the forge `neo-pool-deletions` lets only admins delete a lane (see the
+  retire decision below).
+- Vault branches are back (the owner's decision): pointers to the start
+  (`safety/`) and the end (`vault/`) of every lane, not redundancy. neo-git
+  archived a merged pool to a frozen `vault/` branch by a separate claim
+  step; here `neo land` writes `vault/<kind>/<slug>` on the lane tip in its
+  own atomic push, so the merge stays merge-once and no extra command
+  exists. pre-push, the guard and `neo-vault-readonly` keep it like an
+  anchor.
+- Lanes are deleted on the forge by admins only, as neo-git's
+  `pool-deletions` ruleset had it (`neo-pool-deletions`). So `neo land` no
+  longer deletes the lane inside its atomic push (a refused deletion would
+  refuse the land): it pushes dev, the tag, the anchor, the number and the
+  vault branch, then tries the deletion apart. An admin's succeeds; anyone
+  else's lane stays, landed, listed by `neo status` and `neo doctor` until an
+  admin's `neo lane --retire` removes it. `neo lane --close` parks the lane
+  the same way.
 - A slug that lands elsewhere first is refused at sync (I7). `neo lane
   --rename` rewrites the lane so its requirement file always carried the
   new slug, never deleting the file the other lane landed.
@@ -150,8 +181,12 @@ count and name in these docs equal to the code.
   records `Released-By:`, pre-push refuses main moving to a release tagged
   by anyone else (or to a lightweight tag), I5 judges every release tag's
   tagger against the policy at the release before it, the agent guard
-  denies `neo release` (its `--dry-run` stays allowed), and on a forge the
-  `neo-main` ruleset lets only the repository's admins update main.
+  denies `neo release` (its `--dry-run` stays allowed) and any `release/<v>`
+  tag an agent would create, write or push, and on a forge the `neo-main`
+  ruleset lets only the repository's admins update main and the
+  `neo-release-tags` ruleset only them create a `release/*` tag. A release
+  tag pushed without main meets pre-push's tagger check too, since a
+  release tag alone opens the next series.
 - A release is `neo release`: the release gate runs on dev's exact tip,
   `release/<version>` tags it and main fast-forwards to it in one atomic
   push. main never takes a commit dev does not hold (I5), and the next land
@@ -186,16 +221,21 @@ count and name in these docs equal to the code.
   and the server rulesets. `.neo/FRAMEWORK` marks this repository as the
   framework source, the one place `.neo` may be edited; `conf` and
   `identity-map` are the consumer's own files and stay editable everywhere.
-- `neo setup --remote` applies four rulesets (dev and main: no deletion, no
+- `neo setup --remote` applies nine rulesets (dev and main: no deletion, no
   force push; `neo-main`: main takes no update at all except from the
   repository's admins, since main is production and only the owner promotes;
-  `attic/**`: no deletion, no force push; `v*` and `release/*`
+  `neo-release-tags`: no new `release/*` tag except from those admins;
+  `neo-review`: dev alone, where `land_pr=required` adds the review rule;
+  `attic/**`: no deletion, no force push; neo-git's `neo-safety-lockdown`
+  (safety branches: no creation, update or deletion), `neo-vault-readonly`
+  (vault branches: no update or deletion) and `neo-pool-deletions` (lanes:
+  no deletion), each bypassed by repository admins only; `v*` and `release/*`
   tags: no update, no deletion) and writes a read-only `neo-check` workflow.
   The workflow never runs the candidate's checker: it extracts `.neo` from
   dev (for a dev push, from dev as it was before the push) and runs that
   copy against the candidate, so a lane that replaces `.neo/neo` is judged by
-  the checker it tried to replace. With `land_pr=required` the dev ruleset
-  also carries GitHub's own `pull_request` rule (`land_approvals` approvals,
+  the checker it tried to replace. With `land_pr=required` the dev-only
+  `neo-review` ruleset also carries GitHub's own `pull_request` rule (`land_approvals` approvals,
   stale approvals dismissed on a push, the last push approved by someone
   else) and the neo-check status: `neo land --pr` publishes the merge as the
   lane's head, reviewers approve that exact commit, the workflow proves it
@@ -219,14 +259,22 @@ count and name in these docs equal to the code.
   downgrade lands, gates and versions like any change; it keeps `conf`,
   `identity-map` and `requirements/` and never vendors the framework's tests, bench
   or source marker.
+- Under `land_pr=required` on GitHub, `neo land --pr` lands through the PR's
+  merge API (the live canary showed GitHub refusing the push of dev that the
+  merge-as-head path makes): the PR head is the tested lane tip, GitHub writes
+  the merge once with neo's subject, body and trailers, and neo verifies the
+  parents (old dev, tested head), the tree (Tested-Tree) and the subject
+  before tagging; I1 to I9 hold on that merge like on any other. The review
+  rule asks for the last push's approval only when `land_approvals` asks for
+  any. The path below stays for `land_pr=optional`.
 - `neo land --pr` publishes the merge itself as the lane's head and opens or
   updates its PR with the exact merge subject and body. It counts only
   approvals given on that merge sha (an approval of an earlier head never
   counts, so a new commit dismisses it) and, with `land_pr=required`, waits
   for the neo-check status on it; then dev moves to exactly the approved
   commit. The forge's merge button is never a landing path.
-- `neo land` deletes the lane on origin only with a lease on the sha it
-  landed, and refuses while origin's lane holds commits the lander lacks,
+- `neo land` deletes the lane on origin (apart from its atomic push) only
+  with a lease on the sha it landed, and refuses while origin's lane holds commits the lander lacks,
   so a coworker's push to a shared lane is never discarded.
 - The identity map and conf that judge a lane are the ones committed on dev;
   per merge, history uses the ones at its first parent.
@@ -276,6 +324,35 @@ count and name in these docs equal to the code.
   keeps the reverted lane's requirement file (I8) and links the merge it
   undoes, and the repaired work lands as a new lane linking the revert.
 
+## Layout
+
+Every file of the framework's code, named here so none hides (the docs lint
+checks the list):
+
+- `neo`: the CLI, ten verbs, one file.
+- `lib/core.sh`: shared helpers, the kinds, the named rules and their epochs.
+- `lib/message.sh`: the commit and merge message rules and the subject limits.
+- `lib/version.sh`: version math from dev's first-parent line.
+- `lib/policy.sh`: the conf keys and their defaults, the gates, the
+  per-commit fast gate, the owner rule, sizes, tests, gate changes and docs
+  rules.
+- `lib/identity.sh`: the identity map, agent and owner rows.
+- `lib/history.sh`: invariants I1 to I9 and the gate proofs.
+- `lib/tracker.sh`: the tracker contract.
+- `lib/audit.sh`: the deterministic commit audit (size and test smells).
+- `lib/reqs.sh`: the REQUIREMENTS.md register generated from
+  `requirements/`; `lib/reqs-fix.sh` regenerates it on a rebase or re-land,
+  and `lib/reqs-merge.sh` is its merge driver.
+- `lib/gatestore.sh`: the gate result store (by tree and gatecfg) and the
+  merge train (prediction of each queued lane, parallel pre-gating).
+- `hooks/pre-commit`: placeholder requirement and `gates_commit` at commit.
+- `hooks/prepare-commit-msg`: the lane size cap before a commit exists.
+- `hooks/commit-msg`: message, identity and size rules at commit.
+- `hooks/pre-push`: what reaches a shared remote.
+- `lint/run.sh` runs every lint: `lint/docs.sh` (docs against code),
+  `lint/personal.sh` (no personal data) and `lint/quiet-grep.py` (no quiet
+  grep in a pipeline).
+
 ## Bootstrap of this repository
 
 The root commit seeds the repository with a README. The foundation lane
@@ -292,7 +369,7 @@ and gated by the scenarios present at that point.
 |---|---|---|
 | Merge first, then a separate claim amends, re-pushes, tags and vaults | `neo land` writes the final merge once | Version, receipts and requirement are in the merge commit itself (I2, I3); nothing on dev is ever rewritten |
 | Server-allocated pool numbers `nN` and the allocator workflow | `neo lane` numbers every lane `n<N>`, reserved on origin, or `n<N>-<c>` offline | Every lane, landed or abandoned, keeps its creation order and a number no other lane has, offline included (I7); landed order is also the version sequence (I2) |
-| `safety/*` anchors and `vault/*` archive refs | `refs/safety/<kind>/<slug>` anchors, kept forever; no vault | Every lane's fork point survives a sync, a rename, a close and a land in its anchor, pushed with the lane; a landed lane's commits are reachable through its merge's second parent forever; `neo sync` keeps a preflight ref before every rebase |
+| `safety/*` anchors and `vault/*` archive refs | `safety/<kind>/<slug>` and `vault/<kind>/<slug>` branches kept forever by pre-push, the guard and neo-git's three rulesets | Every lane's fork point survives a sync, a rename, a close and a land in its anchor, pushed with the lane, and its landed tip in its vault ref, pushed with the land; a landed lane's commits are reachable through its merge's second parent forever; `neo sync` keeps a preflight ref before every rebase |
 | Machine-authored reconcile branches and the auto-rebase ladder | `neo sync` by the lane's author; `neo sync --dev` re-lands offline work | Every re-landed merge passes the gates again and takes the next version; the old one keeps `superseded/<v>-<sha>`; a conflict stops a resumable plan, never drops a land (I9) |
 | GitHub merge button, PR validation workflows, claim workflows | `neo land` (and `--pr` for review) | Gates run on the exact merge tree before the merge exists (`Tested-Tree`). Under `land_pr=required` dev's ruleset carries GitHub's review rule (approvals after the last push) and the neo-check status, computed by dev's checker on the exact merge; under `optional` the forge reruns every new merge's gates after the push |
 | Off-grid and connected modes | one flow; a remote is a transport | The same checks run with and without origin; offline is a state handled by `neo sync --dev` |
@@ -300,13 +377,13 @@ and gated by the scenarios present at that point.
 | Sixteen agent skills (lenses), user overrides and a lazy loader | one skill, `skill/SKILL.md`, whose task table loads one lens file from `skill/lenses/` per task | Every rule of every neo-git lens has a home, listed rule by rule in `skill/lenses/RULE-MAP.md`: the skill, a lens file section, or the code that enforces it; the docs lint proves the loader and the map resolve. About a fifth of neo-git's bytes; user overrides stay cut (one skill to override) |
 | Doc-freshness gate and protocol lint over skills and docs | `.neo/lint/docs.sh` in every gate | Verbs and flags, invariant ids, conf keys, kinds and tags, scenario ids and counts in the docs are read from the code and must match it |
 | CHANGELOG file, `changelog` and `release-of` tools | none; history answers both | A changelog is `git log --first-parent --format='%s%n%n%b' vA..vB` on dev (each merge's body is its entry); a commit's release is `git tag --contains <sha> --sort=v:refname 'release/*'`, first line. A file would be a second database (principle 2) |
-| Live canaries on public throwaway repositories | `tests/canary/live.sh` in one persistent public canary repository, run by hand | Forge behaviour is driven through a `gh` stub on every land (S20, S28, S40) and the workflow's own step scripts are executed locally (S40); the live canary proves it on GitHub itself (Live canary, below): rulesets refusing a forced dev, a deleted dev, a moved tag and a deleted attic branch past the hooks, the workflow's jobs, a release, review under `land_pr=required`; it never deletes a repository (S87 proves its safety against a stub) |
+| Live canaries on public throwaway repositories | `tests/canary/live.sh` in one persistent public canary repository, run by hand | Forge behaviour is driven through a `gh` stub on every land (S20, S28, S40) and the workflow's own step scripts are executed locally (S40); the live canary proves it on GitHub itself (Live canary, below): rulesets refusing a forced dev, a deleted dev, a moved tag and a deleted attic branch past the hooks, the workflow's jobs, a release, review under `land_pr=required`; it never deletes a repository (S97 proves its safety against a stub) |
 | Reconstruct, shuttle, snapshot and rewrite tooling | out of the core | Not needed by the flow; history quality is enforced at land, not repaired afterwards; the rebuild rules live in the skill's `rebuild.md` lens |
 | Bench harness, agent runner and loadbytes | `bench/speed.sh` and `bench/loadbytes.py`, framework-only | Lean's speed and read budget are measured against neo-git, not claimed (Measured, above); the model-run agent bench stays out: no model is called |
 
 Kept as they were: the message rules, the identity map, the protected-ref and
 tag rules of pre-push, the agent guard and preflight, the tracker contract's
-operator-only command adapter, and a thorough scenario matrix (S01 to S90)
+operator-only command adapter, and a thorough scenario matrix (S01 to S99)
 that runs on every land.
 
 The agent skill is one loader with lazy lenses, as neo-git's lean loader
@@ -359,20 +436,19 @@ review and C8 a release under `land_pr=required` (hole M1); C0 and C9 put the
 canary back to optional review, lifting the review rule as the owner's admin
 step first. Cleanup removes only the run's unlanded lanes by name; tags, the
 attic, dev and main stay by rule. It needs gh's `repo` and `workflow` scopes,
-never `delete_repo` (S87 proves the safety against a stub).
+never `delete_repo` (S97 proves the safety against a stub).
 
-Live runs, 2026-11-12 (receipts in the restoration progress record): run
-261112104430 passed C0 to C6 and C9 and failed C7 and C8. C4 failed in the
-run before it: GitHub matches ruleset patterns with fnmatch, so
-`refs/heads/attic/**` protected one level only and a parked lane was
-deleted; the ruleset now includes `refs/heads/attic/**/*` and C4 passes. C7
-and C8 are open defects of the forge flow: with `land_pr=required`, dev's
-ruleset carries GitHub's pull_request rule, and GitHub refuses the push that
-`neo land --pr` makes to move dev to the approved merge ("atomic transaction
-failed" on the lane, the tag refused) and the push of main by `neo release`
-("push declined due to repository rule violations"), since neo-protected
-also covers main. Hole M1 is confirmed live; how review should move dev and
-main on GitHub is the owner's decision.
+Live runs, 2026-11-12 (receipts in the restoration progress record): the
+first runs found three forge defects. C4: GitHub matches ruleset patterns
+with fnmatch, so `refs/heads/attic/**` protected one level only and a
+parked lane was deleted; the ruleset now includes `refs/heads/attic/**/*`.
+C7: GitHub's pull_request rule refused the push of dev that `neo land --pr`
+made, and then, with `land_approvals=0`, every merge, because the rule
+still asked for the last push's approval; `land --pr` now merges through
+the PR's merge API and the rule asks for that approval only when one is
+required. Run 261112112547 then passed C0 to C7 and C9. C8 still fails: the
+release push of main is refused under `land_pr=required` (hole M1 confirmed
+live); the release path is batch B's restoration.
 
 ## Measured: speed and read budget
 
@@ -428,6 +504,21 @@ The read budget is where the token claim lives: an agent reading lean's skill
 and one lens reads 58 % fewer bytes than with neo-git's lean loader, 96 %
 fewer than with how-git. Bytes are not tokens and no model run was made, so
 this is the budget an agent is told to read, not a measured token bill.
+
+### Merge train: a land with a stored hit against a miss
+
+Measured on 2026-11-12, Darwin arm64, bash 3.2, load average about 4.5:
+
+- lean's own gates on this lane's predicted merge tree (`neo train add`,
+  one lane commit): 1122 s, of which the fast gate 130 s and the full gate
+  989 s; the fast gate on the merge tree came from the store, where the old
+  land ran it a second time. A land that misses the store pays this inside
+  the land lock; one that hits pays none of it.
+- Wall time of `neo land` on a scratch repository whose full gate takes
+  20 s (three runs, each a fresh repository, one lane commit): miss 21.9 s,
+  21.9 s, 21.9 s; hit (the lane pre-gated with `neo train add`) 1.7 s,
+  1.7 s, 1.7 s. A hit costs the land's own checks, merge, tag and push,
+  whatever the gates cost.
 
 ## Build history
 

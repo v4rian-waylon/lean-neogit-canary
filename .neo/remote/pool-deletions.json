@@ -1,0 +1,8 @@
+{
+  "name": "neo-pool-deletions",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/heads/lane/*", "refs/heads/lane/*/*"], "exclude": [] } },
+  "rules": [ { "type": "deletion" } ],
+  "bypass_actors": [ { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" } ]
+}

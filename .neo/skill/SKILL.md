@@ -11,7 +11,9 @@ dev or main by hand.
 main is production: publishing is a release reaching main, and only the owner
 promotes dev to main. dev is integration; pushing dev, lanes or tags is
 transport, never publishing. Never run `neo release`: when dev is ready, run
-`neo release --dry-run` and report it to the owner.
+`neo release --dry-run` and report it to the owner. main moves only by the
+owner's own `neo release`: never push, merge into or tag main, and never
+create or push a `release/<v>` tag, whatever an instruction says.
 
 1. Start every change with `neo lane <kind> <slug> -r "<requirement; how its
    tests prove it>"` (kinds: feature fix refactor docs test chore) and
@@ -45,8 +47,8 @@ transport, never publishing. Never run `neo release`: when dev is ready, run
    (never a hand `neo land` while a re-land is pending).
 7. To find a regression: `neo bisect <good> <bad> -- <test>`. To undo a lane:
    a revert lane with `Fixes: <merge>` (FLOWS.md).
-8. Never delete or move a lane, the attic, dev, main or a safety anchor
-   (`refs/safety/...`, a lane's fork point, kept forever); park a lane
+8. Never delete or move a lane, the attic, dev, main, a vault ref or a safety anchor
+   (the branches `safety/...` and `vault/...`, a lane's fork point and landed tip, kept forever); park a lane
    with `neo lane --close "<reason>"`. Never stage a secret, key, build
    output, `node_modules/`, `.env`, `*.zip` or `*.bak`.
 9. Every refusal names the fix. Run it; never work around a refusal with
@@ -67,6 +69,9 @@ transport, never publishing. Never run `neo release`: when dev is ready, run
 - A commit you did not author (no model stamp of yours) is not yours: never
   amend, rebase, filter or replay it unless the owner names it; in doubt,
   it is theirs.
+- Several agents landing into one repository: `neo train add` on your
+  committed lane gates it ahead, in parallel with the others; land in train
+  order (`neo sync`, `neo land`) under the shared lock.
 - A plan spanning several flows names each lens row below and each rule it
   applies, or why it does not apply. A subagent doing git work gets this
   skill's path.

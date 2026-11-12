@@ -19,6 +19,8 @@
 # Message smells live in neo_msg_violations (lib/message.sh); this file holds
 # the two that read the diff.
 
+# the size cap's default, named once: lint/docs.sh checks RULES' policy table against it
+NEO_MAX_COMMIT_LINES_DEFAULT=800
 NEO_TEST_PATHS_DEFAULT='test/* tests/* */test/* */tests/* spec/* */spec/* *_test.* *.test.* *_spec.* test_*'
 
 # neo_path_is_test PATH: 0 when PATH matches test_paths (dev's conf).
@@ -47,7 +49,7 @@ neo_path_is_doc() {
 neo_diff_smells() {
   local subj="$1" stat="$2" prev_red="${3:-0}" max lines=0 a d p behav=0 tested=0 tag
   neo_rule_on commit-audit || return 0
-  max=$(neo_conf max_commit_lines 800)
+  max=$(neo_conf max_commit_lines "$NEO_MAX_COMMIT_LINES_DEFAULT")
   [[ "$max" =~ ^[0-9]{1,6}$ ]] && [ "$max" -ge 1 ] || NEO_RC=2 neo_die "max_commit_lines='$max' must be 1 to 999999"
   while IFS=$'\t' read -r a d p; do
     [ -n "${p:-}" ] || continue

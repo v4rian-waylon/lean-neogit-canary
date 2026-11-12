@@ -33,7 +33,7 @@ if [ -n "$out" ] || [ -n "$idp" ]; then
   echo "X commit-msg: the commit breaks the rules:" >&2
   printf '%s\n' "$out" "$idp" | sed '/^$/d; s/^/  - /' >&2
   [ -z "$out" ] || {
-    echo "  Subject: [NEW|FIX|REFACTOR|DOCS|TEST|REVERT|HOTFIX] Capitalised summary, 12 to 72 chars, no final period." >&2
+    echo "  Subject: [NEW|FIX|REFACTOR|DOCS|TEST|REVERT|HOTFIX] Capitalised summary, $NEO_SUBJ_MIN to $NEO_SUBJ_MAX chars, no final period." >&2
     echo "  A test-first commit that fails its test on purpose carries one trailer: Red: <test name>." >&2
     echo "  One concern per commit, with its test; a [FIX] body says Cause: then Fix: (RULES.md, Commits)." >&2; }
   [ -z "$idp" ] || echo "  Identities come from .neo/identity-map as committed on dev; an agent authors as '<name> (<Model>)'." >&2

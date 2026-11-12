@@ -16,6 +16,13 @@
 #   lenses       every lens file SKILL's task table names exists, every lens
 #                file is named there (the lazy loader resolves), and every
 #                home RULE-MAP gives is a file that exists
+#   limits       the subject limits (message.sh) and the max_commits
+#                (policy.sh) and max_commit_lines (audit.sh) defaults wherever RULES, SKILL
+#                and the policy table state them; every exit code neo uses
+#                in the usage's "Exit codes:" line
+#   sections     FLOWS keeps the section that carries each verb's flow
+#   layout       DESIGN's Layout section names every file under .neo/lib,
+#                .neo/hooks and .neo/lint
 # Docs: .neo/*.md, .neo/skill/SKILL.md, neo's usage header and, in the
 # framework source, the root README.md. Requirement files are history (I8),
 # never edited after they land, so they are not judged here. Prints one line
@@ -108,6 +115,57 @@ for f in "${docs[@]}"; do
   grep -F 'main is production' "$f" >/dev/null || bad "$f does not state that main is production (only the owner promotes dev to main)"
 done
 grep -F 'main is production' <<<"$usage" >/dev/null || bad "neo's usage does not state that main is production"
+
+# ---- limits: one number in the code, the same number in every doc that states it
+smin=$(sed -nE 's/^NEO_SUBJ_MIN=([0-9]+)$/\1/p' "$N/lib/message.sh"); smax=$(sed -nE 's/^NEO_SUBJ_MAX=([0-9]+)$/\1/p' "$N/lib/message.sh")
+[ -n "$smin" ] && [ -n "$smax" ] || bad "$N/lib/message.sh names no NEO_SUBJ_MIN and NEO_SUBJ_MAX"
+for f in "$N/RULES.md" "$N/skill/SKILL.md"; do
+  flat=$(tr '\n' ' ' < "$f" | tr -s ' ')
+  while read -r a b; do
+    [ -n "$a" ] || continue
+    [ "$a $b" = "$smin $smax" ] || bad "$f says subjects are $a to $b chars; message.sh says $smin to $smax"
+  done <<<"$(grep -oE '[0-9]+ to [0-9]+ chars, no final period' <<<"$flat" | sed -E 's/^([0-9]+) to ([0-9]+).*/\1 \2/' || true)"
+  grep -F "$smin to $smax chars" <<<"$flat" >/dev/null || bad "$f does not state the subject limits ($smin to $smax chars)"
+done
+bt='`'
+for kv in "max_commits NEO_MAX_COMMITS_DEFAULT policy.sh" "max_commit_lines NEO_MAX_COMMIT_LINES_DEFAULT audit.sh"; do
+  set -- $kv
+  d=$(sed -nE "s/^$2=([0-9]+)\$/\1/p" "$N/lib/$3")
+  [ -n "$d" ] || { bad "$N/lib/$3 names no $2"; continue; }
+  row=$(grep -E "^\| $bt$1$bt \|" "$N/RULES.md" || true)
+  [ "$(awk -F'|' '{ gsub(/^ +| +$/, "", $4); print $4 }' <<<"$row")" = "$d" ] || bad "$N/RULES.md's policy table gives $1 a default other than $d"
+  while read -r k; do
+    [ -n "$k" ] || continue
+    [ "$k" = "$d" ] || bad "$N/RULES.md says $1 defaults to $k; policy.sh says $d"
+  done <<<"$(tr '\n' ' ' < "$N/RULES.md" | tr -s ' ' | grep -oE "$bt$1$bt[^.;]{0,40}\(default [0-9]+" | sed -E 's/.*default ([0-9]+)$/\1/' || true)"
+done
+codes=$( { echo 0; echo 1; grep -ohE 'NEO_RC=[0-9]+' "$N/neo" "$N"/lib/*.sh | sed 's/.*=//'; grep -oE 'return 3$' "$N/neo" | sed 's/return //'; } | sort -un)
+exitline=$(awk '/^Exit codes:/ { on = 1 } on { printf "%s ", $0; if ($0 ~ /\.$/) exit }' <<<"$usage")
+[ -n "$exitline" ] || bad "neo's usage has no 'Exit codes:' line"
+for k in $codes; do
+  grep -E "(:|,) $k " <<<"$exitline" >/dev/null || bad "neo exits $k; the usage's Exit codes line does not say what it means"
+done
+
+# ---- sections: FLOWS keeps the flow of every verb
+flows_heads=$(grep -E '^## ' "$N/FLOWS.md" || true)
+for vh in "setup:## Start a repository" "lane:## Work on a change" "land:## Work on a change" "check:## Work on a change" \
+          "sync:## When dev moved under you" "release:## Release" "bisect:## Find and undo a regression" \
+          "status:## Recover and tidy" "doctor:## Recover and tidy"; do
+  v="${vh%%:*}"; h="${vh#*:}"
+  grep -Fx -- "$v" <<<"$verbs" >/dev/null || continue
+  grep -F -- "$h" <<<"$flows_heads" >/dev/null || bad "$N/FLOWS.md lost the section '$h' that carries the flow of neo $v"
+done
+for v in $verbs; do
+  grep -F "neo $v" "$N/FLOWS.md" >/dev/null || bad "$N/FLOWS.md never names neo $v"
+done
+
+# ---- layout: DESIGN names every file of the framework's code
+layout=$(sed -n '/^## Layout/,/^## Bootstrap/p' "$N/DESIGN.md")
+[ -n "$layout" ] || bad "$N/DESIGN.md has no Layout section"
+for f in "$N"/lib/* "$N"/hooks/* "$N"/lint/*; do
+  [ -f "$f" ] || continue
+  grep -F "${f#$N/}" <<<"$layout" >/dev/null || bad "$N/DESIGN.md's Layout does not name ${f#$N/}"
+done
 
 # ---- lenses: the lazy loader resolves both ways, and the rule map points at real homes
 if [ -d "$N/skill/lenses" ]; then

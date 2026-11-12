@@ -10,7 +10,9 @@
 #     production, so that tag is annotated and its tagger is the owner by the
 #     policy committed at the main it moves from (lib/policy.sh)
 #   - version and release tags are created once, never moved or deleted,
-#     and a version tag sits on the merge whose subject names it
+#     and a version tag sits on the merge whose subject names it; a release
+#     tag, which opens the next series even without main, is the owner's
+#     like main itself
 #   - lane commits carry ruled messages, known authors and known committers
 #     (dev's identity map) and add no banned file; an attic branch is never
 #     deleted, and a lane is deleted only as neo moves it in the same push
@@ -18,10 +20,12 @@
 #   - a lane push holds at most max_commits commits and every one of them
 #     passes the fast gate or is a valid Red: commit (neo_check_each), so a
 #     red commit never reaches a shared remote unnamed
-#   - safety anchors (refs/safety/<kind>/<name>) stay forever: never deleted
+#   - safety anchors (refs/heads/safety/<kind>/<name>, earlier refs/safety/...) and
+#     vault branches (refs/heads/vault/...) stay forever: never deleted
 #     or moved, and a lane or attic push takes its anchor along (pushing it
 #     first when the remote lacks it), and with it the lane's number
-#     reservation refs/safety/numbers/<number>
+#     reservation refs/heads/safety/numbers/<number>; a landed or closed lane
+#     is deleted apart, as neo retires it (dev holds it, or attic/ has its tip)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for l in core message version policy identity history tracker audit reqs; do . "$here/lib/$l.sh"; done
@@ -29,6 +33,16 @@ zero=0000000000000000000000000000000000000000
 remote="${1:-origin}"
 fail() { echo "X pre-push: $*" >&2; exit 1; }
 lines=$(cat)
+# release_gov C: the main whose policy judges a release tag on C: main as this
+# push moves it from, else origin's main, else this clone's main, else C's root.
+release_gov() {
+  local m
+  m=$(awk -v z="$zero" '$3 == "refs/heads/main" { print ($4 == z ? "" : $4) }' <<<"$lines" | sed -n 1p)
+  [ -n "$m" ] || m=$(git ls-remote "$remote" refs/heads/main 2>/dev/null | cut -f1)
+  if [ -z "$m" ] || ! git cat-file -e "$m^{commit}" 2>/dev/null; then m=$(git rev-parse -q --verify refs/heads/main || true); fi
+  [ -n "$m" ] || m=$(git rev-list --max-parents=0 --first-parent "$1" | tail -n 1)
+  printf '%s' "$m"
+}
 # the version tags this push carries (a dev merge must arrive with its tag)
 pushed_tags=""
 while read -r _l _s r _r; do
@@ -51,7 +65,15 @@ while read -r lref lsha rref rsha; do
           case "$s" in "[MERGE] "*": $t") ;; *) fail "tag $t is not on the merge that names it" ;; esac ;;
         release/*)
           [ -n "$(git tag --points-at "$c" -l "${t#release/}")" ] || fail "tag $t is not on the commit tagged ${t#release/}"
-          [ "$(git cat-file -t "$lsha")" = tag ] || fail "release tag $t must be annotated (made by neo release)" ;;
+          [ "$(git cat-file -t "$lsha")" = tag ] || fail "release tag $t must be annotated (made by neo release)"
+          # a release tag alone opens the next series: it is the owner's, by the policy at main as it
+          # stands (a release cut before the framework knew the owner rule is not judged by it, as in I5)
+          if git show "$c:.neo/lib/policy.sh" 2>/dev/null | grep -F 'release_who' >/dev/null; then
+            gov=$(release_gov "$c")
+            tagger=$(git for-each-ref --format='%(taggeremail)' "refs/tags/$t" | tr -d '<>')
+            why=$(neo_policy_may_release "$gov" "$c" "$tagger") \
+              || fail "release tag $t was tagged by '${tagger:-<none>}': $why"
+          fi ;;
       esac ;;
     refs/heads/dev|refs/heads/main)
       b="${rref#refs/heads/}"
@@ -112,6 +134,11 @@ while read -r lref lsha rref rsha; do
         # or it already landed there: GitHub merged it through its PR (land --pr under land_pr=required)
         if [ "$moved" = 0 ] && git rev-parse -q --verify "refs/remotes/$remote/dev" >/dev/null \
            && git merge-base --is-ancestor "$rsha" "refs/remotes/$remote/dev" 2>/dev/null; then moved=1; fi
+        # or neo retires it apart, after the land or the close: dev here holds it (landed), or
+        # the remote already parks it as attic/<same name> at that tip (closed)
+        if [ "$moved" = 0 ] && git rev-parse -q --verify refs/heads/dev >/dev/null \
+           && git merge-base --is-ancestor "$rsha" refs/heads/dev 2>/dev/null; then moved=1; fi
+        if [ "$moved" = 0 ] && [ "$(git ls-remote "$remote" "refs/heads/attic/${rref#refs/heads/lane/}" 2>/dev/null | cut -f1)" = "$rsha" ]; then moved=1; fi
         [ "$moved" = 1 ] || fail "${rref#refs/heads/} is never deleted by hand (developers never delete a lane); park it with neo lane --close <reason>, or land it"
         continue
       fi
@@ -152,7 +179,7 @@ while read -r lref lsha rref rsha; do
           git push -q "$remote" "$an:$an" </dev/null || fail "could not push ${an}, the safety anchor of ${rref#refs/heads/}"
         elif [ "$ra" != "$(git rev-parse "$an")" ]; then
           case "$an" in
-            refs/safety/numbers/*) fail "$remote holds another $an (another lane took this number); close this lane (neo lane --close) and carry its commits to a new lane" ;;
+            refs/heads/safety/numbers/*|refs/safety/numbers/*) fail "$remote holds another $an (another lane took this number); close this lane (neo lane --close) and carry its commits to a new lane" ;;
             *) fail "$remote holds another $an (a lane of this name forked elsewhere); rename this lane (neo lane --rename)" ;;
           esac
         fi
@@ -173,13 +200,35 @@ while read -r lref lsha rref rsha; do
         [ -z "$bf" ] || fail "commit $(git rev-parse --short "$c") adds banned file(s): $(tr '\n' ' ' <<<"$bf")(secrets, keys, builds, .env, archives never enter history)"
       done
       unset NEO_RULES_AT ;;
+    refs/heads/safety/*|refs/heads/vault/*)
+      # neo-git's anchor and vault branches stay forever: created once by neo, never deleted or moved
+      [ "$lsha" != "$zero" ] || fail "${rref#refs/heads/} is never deleted (safety anchors and vault branches stay forever)"
+      [ "$rsha" = "$zero" ] || [ "$rsha" = "$lsha" ] || fail "${rref#refs/heads/} already exists on $remote and is never moved"
+      case "$rref" in
+        refs/heads/safety/*)
+          [ "$(git rev-list --parents -n1 "$lsha" | wc -w | tr -d ' ')" = 2 ] \
+            && case "$(git log -1 --format=%s "$lsha")" in "neo lane "*": fork point "*) true ;; *) false ;; esac \
+            || fail "${rref#refs/heads/} must be the anchor commit neo lane writes (one parent, the fork point)" ;;
+        *)
+          okv=0
+          git merge-base --is-ancestor "$lsha" refs/heads/dev 2>/dev/null && okv=1
+          while read -r _l s2 r2 _r; do
+            [ "$r2" = refs/heads/dev ] && [ "$s2" != "$zero" ] && git merge-base --is-ancestor "$lsha" "$s2" 2>/dev/null && okv=1
+          done <<<"$lines"
+          # or the remote's dev already holds it (a merge through the PR, land --pr)
+          if [ "$okv" = 0 ]; then
+            rd=$(git ls-remote "$remote" refs/heads/dev 2>/dev/null | cut -f1)
+            [ -n "$rd" ] && git cat-file -e "$rd^{commit}" 2>/dev/null && git merge-base --is-ancestor "$lsha" "$rd" 2>/dev/null && okv=1
+          fi
+          [ "$okv" = 1 ] || fail "${rref#refs/heads/} must be a landed lane's tip, which dev holds" ;;
+      esac ;;
     refs/heads/*) fail "branch ${rref#refs/heads/} is not dev, main, lane/<kind>/<slug> or attic/<kind>/<slug>" ;;
-    refs/safety/*)
-      # safety anchors stay forever: created once by neo, never deleted or moved
-      [ "$lsha" != "$zero" ] || fail "safety anchor ${rref} is never deleted (safety anchors stay forever)"
-      [ "$rsha" = "$zero" ] || [ "$rsha" = "$lsha" ] || fail "safety anchor ${rref} already exists on $remote and is never moved"
+    refs/safety/*|refs/vault/*)
+      # safety anchors (a lane's start) and vault refs (its end) stay forever: created once by neo, never deleted or moved
+      [ "$lsha" != "$zero" ] || fail "${rref} is never deleted (safety anchors and vault refs stay forever)"
+      [ "$rsha" = "$zero" ] || [ "$rsha" = "$lsha" ] || fail "${rref} already exists on $remote and is never moved"
       [ "$(git cat-file -t "$lsha" 2>/dev/null)" = tag ] && git rev-parse -q --verify "$lsha^{commit}" >/dev/null \
-        || fail "safety anchor ${rref} must be the annotated fork point neo lane writes" ;;
+        || fail "${rref} must be the annotated fork point or lane tip neo writes" ;;
     refs/notes/neo) ;;
     *) ;;
   esac

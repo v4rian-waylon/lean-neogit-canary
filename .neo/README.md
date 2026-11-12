@@ -12,8 +12,9 @@ quality, control or traceability.
   (status, priority, tests, source, code, protected rows, a graveyard) and is
   generated from `requirements/<slug>.md`, so it cannot drift.
 - **Fork points stay forever.** `neo lane` anchors every lane at the commit
-  it forked from (`refs/safety/<kind>/<slug>`); every push of the lane
-  carries the anchor, and nothing deletes or moves it.
+  it forked from (the branch `safety/<kind>/<slug>`) and `neo land` records where
+  it ended (`vault/<kind>/<slug>`); every push of the lane carries its
+  anchor, and nothing deletes or moves either.
 - **Nothing is lost, nothing leaks.** Lanes, the attic, dev and main are
   never deleted by hand, and no secret, key, build output or archive is ever
   committed (`pre-commit`, land, pre-push, the agent guard).
@@ -62,15 +63,16 @@ file, the identity map included: list the team under
 | Command | Does |
 |---|---|
 | `neo setup` | hooks, identity, seed main and dev; `--agent` guard (`--uninstall`, `--prefix`); `--remote` rulesets and CI (`--repo`, `--dry-run`); `--upgrade` the vendored `.neo` |
-| `neo lane` | start a lane (`-r`, `--proof`, `--ticket`); `--close`, `--restore`, `--rename` |
+| `neo lane` | start a lane (`-r`, `--proof`, `--ticket`); `--close`, `--restore`, `--rename`, `--retire` |
 | `neo check` | a gate on the work tree (`--gate`); `--each` the commit audit and the fast gate on every lane commit; `--audit` the deterministic commit audit on the lane or a merge's lane; `--reqs` REQUIREMENTS.md against the register `requirements/` generates (`--write` regenerates it); `--merge` the forge's proof of a `land --pr` candidate; `--judge` an advisory review (`--strict` fails on a finding) |
-| `neo land` | merge once into dev, gated, tagged, pushed atomically (`-F` body, `--dry-run`); `--pr` through review |
+| `neo land` | merge once into dev, gated, tagged, pushed atomically (`-F` body, `--dry-run`); `--pr` through review; `--predict` gates ahead the exact merge a land on a given base would write |
+| `neo train` | the merge train: the queued lanes in landing order; `add` queues a lane and `predict` gates every queued lane in parallel on its predecessors' predicted merges, so each land in order reuses its stored gates |
 | `neo sync` | rebase the lane onto dev; `--dev` reconcile dev with origin after offline work (`--continue`, `--abort` a stopped re-land) |
 | `neo release` | the owner only (main is production): release gate, `release/<v>` listing the lanes still open, main fast-forwards (`--dry-run`) |
 | `neo bisect` | find the lane, then the commit, that broke a command |
 | `neo status`, `neo doctor` | where you are (`--json`); the install (`--fix`), the history invariants (`--history`, `--since`, `--history-only`), every merge's gates rerun (`--prove`) |
 
-Nine verbs, one CLI. The docs are checked against the code by `.neo/lint/docs.sh`.
+Ten verbs, one CLI. The docs are checked against the code by `.neo/lint/docs.sh`.
 
 ## Read next
 
