@@ -1,0 +1,108 @@
+# neo-check: re-verifies on the forge what neo land and neo release already
+# checked locally, with a read-only token and no secrets; it never lands or
+# moves anything. The checker always comes from the protected base (dev's
+# committed .neo; for a dev push, dev as it was before the push), never from
+# the commit under review, so a candidate cannot swap the code that judges it.
+# The gates it runs are still the candidate's own tests on the candidate's
+# tree, and a candidate can edit this workflow file: under land_pr=required the
+# dev ruleset therefore also requires approvals given after the last push.
+name: neo-check
+on:
+  push:
+    branches: [dev, main, 'lane/**']
+  pull_request_review:
+    types: [submitted, dismissed]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  neo-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0 # every branch and tag: the history checks walk them all
+          persist-credentials: false
+      - name: history invariants, lane commits and gate proofs, by dev's checker
+        env:
+          PUSHED_REF: ${{ github.event_name == 'pull_request_review' && format('refs/heads/{0}', github.event.pull_request.head.ref) || github.ref }}
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -eu
+          for b in dev main; do
+            if git rev-parse -q --verify "refs/remotes/origin/$b" >/dev/null; then
+              git update-ref "refs/heads/$b" "refs/remotes/origin/$b"
+            fi
+          done
+          zero=0000000000000000000000000000000000000000
+          base=refs/heads/dev
+          if [ "$PUSHED_REF" = refs/heads/dev ]; then
+            # dev itself moved: judge it with dev as it was before this push
+            if [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "$zero" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              base="$BEFORE"
+            else
+              base=$(git rev-list --first-parent --max-parents=0 refs/heads/dev | tail -n 1)
+            fi
+          fi
+          trusted=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/neo-trusted.XXXXXX")
+          git archive "$base" .neo | tar -x -C "$trusted"
+          neo="$trusted/.neo/neo"
+          echo "neo-check: checker from $(git rev-parse --short "$base"), candidate $(git rev-parse --short HEAD)"
+          case "$PUSHED_REF" in
+            refs/heads/lane/*)
+              # a land --pr candidate (the merge as the lane's head) is proven: shape, gates, approvals on it
+              if [ "$(git rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" = 3 ]; then "$neo" check --merge HEAD; else "$neo" check --each; fi ;;
+            # every merge new on dev: its gates run again on its own tree, so a forged receipt fails here
+            refs/heads/dev) "$neo" doctor --prove "${BEFORE:-}" ;;
+          esac
+          # the merges up to the base were checked when they arrived; the invariants that span history still run
+          "$neo" doctor --history-only --since "$(git rev-parse "$base")"
+  commit-audit:
+    # the required commit audit (neo-git's required.commit-audit): every pushed lane commit and every
+    # lane of a new dev merge passes neo check --audit, run by dev's checker; deterministic, no model
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: commit audit, by dev's checker
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -eu
+          if git rev-parse -q --verify refs/remotes/origin/dev >/dev/null; then git update-ref refs/heads/dev refs/remotes/origin/dev; fi
+          zero=0000000000000000000000000000000000000000
+          base=refs/heads/dev
+          if [ "$GITHUB_REF" = refs/heads/dev ]; then
+            if [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "$zero" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then base="$BEFORE"
+            else base=$(git rev-list --first-parent --max-parents=0 refs/heads/dev | tail -n 1); fi
+          fi
+          trusted=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/neo-trusted.XXXXXX")
+          git archive "$base" .neo | tar -x -C "$trusted"
+          neo="$trusted/.neo/neo"
+          if [ "$GITHUB_REF" = refs/heads/dev ]; then
+            for m in $(git rev-list --first-parent --reverse "$base..HEAD"); do "$neo" check --audit "$m"; done
+          else
+            "$neo" check --audit HEAD
+          fi
+  neo-linux:
+    # the full gate on Linux (bash 5, GNU tools) for every lane and dev push
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: full gate on Linux, by dev's checker
+        run: |
+          set -eu
+          echo "neo-linux: $(uname -s), bash $(bash -c 'echo $BASH_VERSION')"
+          if git rev-parse -q --verify refs/remotes/origin/dev >/dev/null; then git update-ref refs/heads/dev refs/remotes/origin/dev; fi
+          trusted=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/neo-trusted.XXXXXX")
+          git archive refs/heads/dev .neo | tar -x -C "$trusted"
+          NEO_CONF_REV=refs/heads/dev "$trusted/.neo/neo" check --gate full
