@@ -19,6 +19,7 @@
 | REQ-R-unreview0-261112104430 | Run 261112104430 puts lands back to optional review left by an earlier run. | P2 | ✅ done | ⚠️ needs units | internal | `chore/unreview0-261112104430` |
 | REQ-R-upgrade-261112104430 | The canary takes the framework under test for run 261112104430. | P2 | ✅ done | ⚠️ needs units | internal | `chore/upgrade-261112104430` |
 | REQ-R-widget-261112104037 | A widget lane of run 261112104037 runs the forge jobs green. | P1 | ✅ done | ⚠️ needs units | internal | `feature/widget-261112104037` |
+| REQ-R-widget-261112104430 | A widget lane of run 261112104430 runs the forge jobs green. | P1 | ✅ done | ⚠️ needs units | internal | `feature/widget-261112104430` |
 
 ## Units of Intent
 <!-- NOT binding, NOT protected. Promotes to a Hard Requirement through a lane whose file says Promotes: <slug>. -->
